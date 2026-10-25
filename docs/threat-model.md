@@ -71,6 +71,36 @@ TraceGraph is a defensive OSINT infrastructure intelligence platform designed fo
   - Zero telemetry or phone-home requests.
   - `tracegraph status` explicitly displays only workspace paths and counter metrics. It **never** dumps environment variables or auth tokens.
 
+### 3.7 SSRF & Private Network Enumeration Protection
+- **Threat:** Malicious target inputs (e.g. `127.0.0.1`, `169.254.169.254`, `10.0.0.1`, `::1`) attempting Server-Side Request Forgery against cloud metadata endpoints or local internal services via RDAP or DNS collectors.
+- **Mitigation:**
+  - `src/tracegraph/core/scope.py` implements strict RFC checking (`is_public_ip` and `assert_public_ip`).
+  - Blocks RFC 1918 private subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), RFC 6890 loopbacks (`127.0.0.0/8`, `::1/128`), RFC 3927 link-local addresses (`169.254.0.0/16`), RFC 6598 carrier-grade NAT (`100.64.0.0/10`), RFC 5737 documentation test networks (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`), unique local IPv6 (`fc00::/7`), and multicast ranges.
+  - Collector input validation rejects non-public targets immediately before any network socket or HTTP request is initiated.
+
+### 3.8 Scope Escapes & Target Boundary Enforcement
+- **Threat:** Operators or scripts collecting data against unauthorized targets outside the declared investigation scope.
+- **Mitigation:**
+  - Every collection run requires an active investigation.
+  - `ScopeValidator` enforces that targets strictly match the declared scope (exact domain, subdomain wildcard `*.domain.com`, IP, CIDR block, or explicit unrestricted `*`).
+  - Target out of scope causes immediate command termination with exit code 1 prior to collector instantiation.
+
+### 3.9 Personal Data Minimization (PII Sanitization)
+- **Threat:** Ingestion of personal contact details (individual names, personal email addresses, phone numbers) from registry RDAP responses into investigative databases.
+- **Mitigation:**
+  - `RDAPCollector` sanitizes payloads before storage.
+  - Strips all `vcardArray` structures, individual contact emails, telephone numbers, and postal addresses.
+  - Preserves only public organization/network handles, entity roles, CIDR ranges, and registration dates.
+  - Never invents ownership or registration claims without explicit registry data.
+
+### 3.10 Insecure Redirect & Response Flood Protection
+- **Threat:** Malicious RDAP or DNS redirect chains routing requests to insecure HTTP endpoints or returning multi-megabyte payloads to exhaust memory.
+- **Mitigation:**
+  - Enforces HTTPS-only scheme on all RDAP redirect targets (`Location` headers).
+  - Maximum redirect limit of 3.
+  - Response size hard limit capped at 512 KB (`Content-Length` and received byte inspection).
+  - Conservative rate-limiting delay between requests.
+
 ---
 
 ## 4. Defensive Operational Guidelines

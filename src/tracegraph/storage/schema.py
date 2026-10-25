@@ -51,11 +51,16 @@ class InvestigationRecord(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    target_scope: Mapped[str] = mapped_column(Text, default="", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
     config_metadata: Mapped[dict[str, Any]] = mapped_column(
         JSON, default=dict, nullable=False
+    )
+
+    observations: Mapped[list["ObservationRecord"]] = orm_relationship(
+        "ObservationRecord", back_populates="investigation", cascade="all, delete-orphan"
     )
 
 
@@ -94,6 +99,12 @@ class ObservationRecord(Base):
         nullable=False,
         index=True,
     )
+    investigation_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("investigations.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     collector_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     collector_version: Mapped[str] = mapped_column(String(50), nullable=False)
     source_reference: Mapped[str] = mapped_column(String(1024), nullable=False)
@@ -108,6 +119,9 @@ class ObservationRecord(Base):
     error_details: Mapped[dict[str, Any] | str | None] = mapped_column(JSON, nullable=True)
 
     entity: Mapped["EntityRecord"] = orm_relationship("EntityRecord", back_populates="observations")
+    investigation: Mapped["InvestigationRecord | None"] = orm_relationship(
+        "InvestigationRecord", back_populates="observations"
+    )
     evidence_links: Mapped[list["RelationshipEvidenceRecord"]] = orm_relationship(
         "RelationshipEvidenceRecord", back_populates="observation", cascade="all, delete-orphan"
     )

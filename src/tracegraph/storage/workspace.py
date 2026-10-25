@@ -20,6 +20,11 @@ from tracegraph.storage.database import (
     init_database,
     session_scope,
 )
+from tracegraph.storage.migrations import (
+    LATEST_SCHEMA_VERSION,
+    apply_migrations,
+    get_current_schema_version,
+)
 from tracegraph.storage.schema import (
     EntityRecord,
     MetadataRecord,
@@ -31,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_WORKSPACE_DIRNAME = ".tracegraph"
 DEFAULT_DB_FILENAME = "tracegraph.db"
-CURRENT_SCHEMA_VERSION = "1.0.0"
+CURRENT_SCHEMA_VERSION = LATEST_SCHEMA_VERSION
 
 
 @dataclass
@@ -137,18 +142,19 @@ def get_workspace_status(workspace_dir: Path | str | None = None) -> WorkspaceSt
                 error_message="Unable to establish SQLite connection or enforce foreign keys",
             )
 
+        schema_ver = get_current_schema_version(engine)
+        if schema_ver and schema_ver != LATEST_SCHEMA_VERSION:
+            try:
+                schema_ver = apply_migrations(engine)
+            except Exception as e:
+                logger.warning("Auto-migration failed: %s", e)
+
         session_factory = create_session_factory(engine)
-        schema_ver: str | None = None
         entity_cnt = 0
         obs_cnt = 0
         rel_cnt = 0
 
         with session_scope(session_factory) as session:
-            # Query schema_version from metadata table
-            meta = session.get(MetadataRecord, "schema_version")
-            if meta:
-                schema_ver = meta.value
-
             entity_cnt = session.query(EntityRecord).count()
             obs_cnt = session.query(ObservationRecord).count()
             rel_cnt = session.query(RelationshipRecord).count()

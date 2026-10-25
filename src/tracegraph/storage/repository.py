@@ -44,6 +44,7 @@ class EvidenceRepository:
         self,
         name: str,
         description: str | None = None,
+        target_scope: str = "",
         config_metadata: dict[str, Any] | None = None,
         investigation_id: str | None = None,
     ) -> InvestigationModel:
@@ -54,6 +55,7 @@ class EvidenceRepository:
             id=inv_id,
             name=name,
             description=description,
+            target_scope=target_scope,
             created_at=datetime.now(UTC),
             config_metadata=meta,
         )
@@ -63,6 +65,7 @@ class EvidenceRepository:
                 id=model.id,
                 name=model.name,
                 description=model.description,
+                target_scope=model.target_scope,
                 created_at=model.created_at,
                 config_metadata=model.config_metadata,
             )
@@ -80,9 +83,32 @@ class EvidenceRepository:
                 id=record.id,
                 name=record.name,
                 description=record.description,
+                target_scope=record.target_scope,
                 created_at=record.created_at,
                 config_metadata=record.config_metadata,
             )
+
+    def list_investigations(self, limit: int = 100, offset: int = 0) -> list[InvestigationModel]:
+        """List investigations ordered by creation time descending."""
+        with session_scope(self.session_factory) as session:
+            stmt = (
+                select(InvestigationRecord)
+                .order_by(InvestigationRecord.created_at.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+            records = session.execute(stmt).scalars().all()
+            return [
+                InvestigationModel(
+                    id=r.id,
+                    name=r.name,
+                    description=r.description,
+                    target_scope=r.target_scope,
+                    created_at=r.created_at,
+                    config_metadata=r.config_metadata,
+                )
+                for r in records
+            ]
 
     # -------------------------------------------------------------------------
     # Entities (Deduplication & Canonicalization)
@@ -200,15 +226,17 @@ class EvidenceRepository:
         status: CollectionStatus = CollectionStatus.SUCCESS,
         error_details: dict[str, Any] | str | None = None,
         ingested_at: datetime | None = None,
+        investigation_id: str | None = None,
         observation_id: str | None = None,
     ) -> ObservationModel:
-        """Store an observation record linked to an existing entity."""
+        """Store an observation record linked to an existing entity and optional investigation."""
         obs_id = observation_id or generate_uuid()
         ingest_time = ingested_at or datetime.now(UTC)
 
         model = ObservationModel(
             id=obs_id,
             entity_id=entity_id,
+            investigation_id=investigation_id,
             collector_name=collector_name,
             collector_version=collector_version,
             source_reference=source_reference,
@@ -225,9 +253,16 @@ class EvidenceRepository:
             if not entity:
                 raise NotFoundError(f"Target entity '{entity_id}' does not exist")
 
+            # Verify investigation if provided
+            if investigation_id:
+                inv = session.get(InvestigationRecord, investigation_id)
+                if not inv:
+                    raise NotFoundError(f"Investigation '{investigation_id}' does not exist")
+
             record = ObservationRecord(
                 id=model.id,
                 entity_id=model.entity_id,
+                investigation_id=model.investigation_id,
                 collector_name=model.collector_name,
                 collector_version=model.collector_version,
                 source_reference=model.source_reference,
@@ -250,6 +285,7 @@ class EvidenceRepository:
             return ObservationModel(
                 id=record.id,
                 entity_id=record.entity_id,
+                investigation_id=record.investigation_id,
                 collector_name=record.collector_name,
                 collector_version=record.collector_version,
                 source_reference=record.source_reference,
@@ -259,6 +295,34 @@ class EvidenceRepository:
                 status=CollectionStatus(record.status),
                 error_details=record.error_details,
             )
+
+    def list_observations_for_investigation(
+        self, investigation_id: str
+    ) -> list[ObservationModel]:
+        """List all observations associated with a specific investigation."""
+        with session_scope(self.session_factory) as session:
+            stmt = (
+                select(ObservationRecord)
+                .where(ObservationRecord.investigation_id == investigation_id)
+                .order_by(ObservationRecord.observed_at.desc())
+            )
+            records = session.execute(stmt).scalars().all()
+            return [
+                ObservationModel(
+                    id=r.id,
+                    entity_id=r.entity_id,
+                    investigation_id=r.investigation_id,
+                    collector_name=r.collector_name,
+                    collector_version=r.collector_version,
+                    source_reference=r.source_reference,
+                    observed_at=r.observed_at,
+                    ingested_at=r.ingested_at,
+                    data=r.data,
+                    status=CollectionStatus(r.status),
+                    error_details=r.error_details,
+                )
+                for r in records
+            ]
 
     def list_observations_for_entity(self, entity_id: str) -> list[ObservationModel]:
         """List all observations collected for a specific entity."""
@@ -273,6 +337,7 @@ class EvidenceRepository:
                 ObservationModel(
                     id=r.id,
                     entity_id=r.entity_id,
+                    investigation_id=r.investigation_id,
                     collector_name=r.collector_name,
                     collector_version=r.collector_version,
                     source_reference=r.source_reference,
@@ -424,6 +489,7 @@ class EvidenceRepository:
                 ObservationModel(
                     id=o.id,
                     entity_id=o.entity_id,
+                    investigation_id=o.investigation_id,
                     collector_name=o.collector_name,
                     collector_version=o.collector_version,
                     source_reference=o.source_reference,
