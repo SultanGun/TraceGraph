@@ -167,6 +167,7 @@ class TestRDAPCollector:
 
     def test_rdap_timeout(self):
         mock_client = MagicMock(spec=httpx.Client)
+        mock_client.stream.side_effect = httpx.ReadTimeout("Read operation timed out")
         mock_client.get.side_effect = httpx.ReadTimeout("Read operation timed out")
 
         collector = RDAPCollector(http_client=mock_client, rate_limit_delay=0.0)

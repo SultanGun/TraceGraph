@@ -26,17 +26,48 @@ _DISALLOWED_IPV4_NETWORKS = [
     ipaddress.ip_network("255.255.255.255/32"),  # Limited Broadcast
 ]
 
+# Reserved non-public IPv6 networks according to IANA / RFC 6890
+_DISALLOWED_IPV6_NETWORKS = [
+    ipaddress.ip_network("::/128"),  # Unspecified address
+    ipaddress.ip_network("::1/128"),  # Loopback
+    ipaddress.ip_network("::ffff:0:0/96"),  # IPv4-mapped (handled specifically via ipv4_mapped)
+    ipaddress.ip_network("::ffff:0:0:0/96"),  # IPv4-translated
+    ipaddress.ip_network("64:ff9b::/96"),  # IPv4/IPv6 translation (RFC 6052)
+    ipaddress.ip_network("64:ff9b:1::/48"),  # Local-use translation (RFC 8215)
+    ipaddress.ip_network("100::/64"),  # Discard prefix (RFC 6666)
+    ipaddress.ip_network("2001::/23"),  # IETF Protocol Assignments
+    ipaddress.ip_network("2001:db8::/32"),  # Documentation (RFC 3849)
+    ipaddress.ip_network("2002::/16"),  # 6to4 Relay Anycast (RFC 3056)
+    ipaddress.ip_network("fc00::/7"),  # Unique Local Unicast (RFC 4193)
+    ipaddress.ip_network("fe80::/10"),  # Link-Local Unicast (RFC 4291)
+    ipaddress.ip_network("ff00::/8"),  # Multicast (RFC 4291)
+]
+
 
 def is_public_ip(ip_str: str) -> bool:
     """Check if an IP address is a globally routable public address.
 
     Rejects private, loopback, link-local, multicast, documentation, and reserved ranges.
+    Handles both native IPv4/IPv6 and IPv4-mapped IPv6 addresses.
     """
+    if not ip_str or not isinstance(ip_str, str):
+        return False
+
+    cleaned = ip_str.strip()
+    # Reject raw integer or hexadecimal notations without IP delimiters
+    if not ("." in cleaned or ":" in cleaned):
+        return False
+
     try:
-        ip = ipaddress.ip_address(ip_str.strip())
+        ip = ipaddress.ip_address(cleaned)
     except ValueError:
         return False
 
+    # Check IPv4-mapped IPv6 explicitly (e.g. ::ffff:127.0.0.1)
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return is_public_ip(str(ip.ipv4_mapped))
+
+    # Standard IP properties
     if (
         ip.is_private
         or ip.is_loopback
@@ -47,8 +78,16 @@ def is_public_ip(ip_str: str) -> bool:
     ):
         return False
 
+    # Check Python is_global property if available
+    if not getattr(ip, "is_global", True):
+        return False
+
     if isinstance(ip, ipaddress.IPv4Address):
         for net in _DISALLOWED_IPV4_NETWORKS:
+            if ip in net:
+                return False
+    elif isinstance(ip, ipaddress.IPv6Address):
+        for net in _DISALLOWED_IPV6_NETWORKS:
             if ip in net:
                 return False
 
@@ -128,9 +167,9 @@ class ScopeValidator:
                 if str(ip) in self.ip_addresses:
                     return True
                 for net in self.ip_networks:
-                    if ip in net:
+                    if ip.version == net.version and ip in net:
                         return True
-            except ValueError:
+            except (ValueError, TypeError):
                 return False
             return False
 
@@ -147,9 +186,10 @@ class ScopeValidator:
             try:
                 cand_net = ipaddress.ip_network(val, strict=False)
                 for net in self.ip_networks:
-                    if cand_net.subnet_of(net) or cand_net == net:
-                        return True
-            except ValueError:
+                    if cand_net.version == net.version:
+                        if cand_net.subnet_of(net) or cand_net == net:
+                            return True
+            except (ValueError, TypeError):
                 return False
             return False
 

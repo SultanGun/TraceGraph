@@ -35,6 +35,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **SSRF & Network Safety:**
   - Strict IP validation blocking RFC 1918, RFC 6890, RFC 6598, RFC 3927, RFC 5737, and multicast addresses.
 
+### Security
+- **RDAP Redirect Destination & SSRF Hardening:**
+  - Enforced strict destination validation on all HTTP redirect destinations (`Location` header).
+  - Blocked redirects to loopback (`127.0.0.1`, `::1`, `localhost`), link-local (`169.254.0.0/16`), private RFC 1918, and internal domain names (`.local`, `.internal`, `.lan`, `.home.arpa`).
+  - Added authoritative RIR registry host allowlist (`rdap.arin.net`, `rdap.ripe.net`, `rdap.apnic.net`, `rdap.lacnic.net`, `rdap.afrinic.net`, `rdap.iana.org`, `data.iana.org`, `rdap.nic.mil`).
+  - Implemented circular redirect loop detection and relative URL resolution.
+- **Streaming Response Size Enforcement:**
+  - Migrated HTTP client to chunked streaming (`client.stream`), evaluating running byte counts during download to prevent memory exhaustion / DoS from chunked or misleading headers.
+- **IPv4-Mapped IPv6 & IPv6 Disallowed Range Handling:**
+  - Hardened `is_public_ip` to unpack and validate IPv4-mapped IPv6 addresses (`::ffff:x.x.x.x`).
+  - Added explicit disallowed IPv6 blocks for documentation (`2001:db8::/32`), discard prefix (`100::/64`), unique local (`fc00::/7`), and link-local (`fe80::/10`).
+  - Rejected integer/hex formatted inputs without IP delimiters.
+- **Scope & Scope Boundary Crash Prevention:**
+  - Fixed unhandled `TypeError` in `ScopeValidator` during cross-version CIDR comparisons (IPv4 CIDR vs IPv6 network).
+  - Added target validation in `LiveDNSCollector` to reject localhost and RFC 6761/6762 special-use internal domains.
+- **Database Consistency Invariant:**
+  - Enforced that collection runs with `FAILED` or `TIMEOUT` status record observations for provenance auditing but never create or link entity relationships.
+
 ### Changed
 - Bumped package version to `0.2.0-alpha` (`0.2.0a1`).
 - Upgraded `CURRENT_SCHEMA_VERSION` to `2.0.0`.

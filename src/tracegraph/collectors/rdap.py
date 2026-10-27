@@ -1,11 +1,13 @@
 """Bounded RDAP collector for public IP address registries."""
 
 import ipaddress
+import json
 import logging
+import threading
 import time
 from datetime import datetime
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -30,6 +32,18 @@ DEFAULT_RDAP_BOOTSTRAP_URL = "https://rdap.arin.net/registry/ip"
 MAX_RDAP_RESPONSE_BYTES = 512 * 1024  # 512 KB limit to prevent response flood
 DEFAULT_RDAP_TIMEOUT = 10.0
 
+# Authorized authoritative Regional Internet Registry RDAP domains
+DEFAULT_ALLOWED_RDAP_HOSTS: frozenset[str] = frozenset({
+    "rdap.arin.net",
+    "rdap.ripe.net",
+    "rdap.apnic.net",
+    "rdap.lacnic.net",
+    "rdap.afrinic.net",
+    "rdap.iana.org",
+    "data.iana.org",
+    "rdap.nic.mil",
+})
+
 
 class RDAPCollector(BaseCollector):
     """Standards-compliant, bounded RDAP collector for public IP registrations.
@@ -37,8 +51,11 @@ class RDAPCollector(BaseCollector):
     Safety & Privacy Constraints:
     - Only queries globally routable public IP addresses (SSRF defense).
     - Uses standard RIR bootstrap routing (RFC 7484).
-    - Enforces strict response size limits and timeouts.
+    - Enforces strict response size limits and timeouts while streaming.
     - Strips personal contact information (vCard PII) from evidence data.
+    - Validates all redirect destination hosts against allowed RDAP registries.
+    - Rejects redirects to private, loopback, link-local, or internal hosts.
+    - Prevents circular redirect loops and limits redirect depth.
     - Does not invent ownership claims without explicit registry evidence.
     """
 
@@ -52,12 +69,22 @@ class RDAPCollector(BaseCollector):
         bootstrap_url: str = DEFAULT_RDAP_BOOTSTRAP_URL,
         timeout: float = DEFAULT_RDAP_TIMEOUT,
         rate_limit_delay: float = 0.5,
+        allowed_hosts: set[str] | None = None,
     ) -> None:
         self._custom_client = http_client
         self.bootstrap_url = bootstrap_url.rstrip("/")
         self.timeout = timeout
         self.rate_limit_delay = rate_limit_delay
         self._last_request_time: float = 0.0
+        self._rate_limit_lock = threading.Lock()
+
+        # Build allowed hosts set, always including bootstrap host
+        bootstrap_host = urlparse(self.bootstrap_url).hostname or ""
+        self.allowed_hosts: set[str] = (
+            set(allowed_hosts) if allowed_hosts else set(DEFAULT_ALLOWED_RDAP_HOSTS)
+        )
+        if bootstrap_host:
+            self.allowed_hosts.add(bootstrap_host.lower())
 
     def _get_source_reference(self, target: str) -> str:
         return f"{self.bootstrap_url}/{target}"
@@ -65,6 +92,19 @@ class RDAPCollector(BaseCollector):
     def validate_input(self, target: str, entity_type: EntityType | str) -> tuple[EntityType, str]:
         """Validate IP address and ensure it is globally routable (not private/reserved)."""
         typed_type, normalized = super().validate_input(target, entity_type)
+
+        try:
+            ip = ipaddress.ip_address(normalized)
+        except ValueError as e:
+            raise CollectorValidationError(f"Invalid IP address '{target}': {e}") from e
+
+        # Reject IPv4-mapped IPv6 if non-public
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+            if not is_public_ip(str(ip.ipv4_mapped)):
+                raise CollectorValidationError(
+                    f"Target '{target}' is an IPv4-mapped private, loopback, or reserved address. "
+                    "RDAP queries are only permitted for globally routable public IP addresses."
+                )
 
         if not is_public_ip(normalized):
             raise CollectorValidationError(
@@ -75,16 +115,61 @@ class RDAPCollector(BaseCollector):
         return typed_type, normalized
 
     def _apply_rate_limit(self) -> None:
-        """Enforce conservative interval between RDAP queries."""
-        elapsed = time.time() - self._last_request_time
-        if elapsed < self.rate_limit_delay:
-            time.sleep(self.rate_limit_delay - elapsed)
-        self._last_request_time = time.time()
+        """Enforce conservative interval between RDAP queries in a thread-safe manner."""
+        with self._rate_limit_lock:
+            elapsed = time.time() - self._last_request_time
+            if elapsed < self.rate_limit_delay:
+                time.sleep(self.rate_limit_delay - elapsed)
+            self._last_request_time = time.time()
+
+    def _validate_destination_url(self, target_url: str) -> None:
+        """Validate destination URL against SSRF, loopback, and unauthorized host risks."""
+        parsed = urlparse(target_url)
+        scheme = parsed.scheme.lower()
+        if scheme != "https":
+            raise CollectorExecutionError(
+                f"Insecure redirect rejected: RDAP endpoints must use HTTPS ({target_url})"
+            )
+
+        hostname = (parsed.hostname or "").lower().strip()
+        if not hostname:
+            raise CollectorExecutionError(
+                f"Prohibited destination: missing hostname in '{target_url}'"
+            )
+
+        # Reject loopback, link-local, and internal domain suffixes
+        if (
+            hostname in ("localhost", "127.0.0.1", "::1")
+            or hostname.endswith((".local", ".internal", ".lan", ".localhost", ".home.arpa"))
+        ):
+            raise CollectorExecutionError(
+                f"Prohibited redirect destination: internal or loopback host '{hostname}'"
+            )
+
+        # If hostname is an IP literal, ensure it is a public IP
+        try:
+            ip_obj = ipaddress.ip_address(hostname)
+            if not is_public_ip(str(ip_obj)):
+                raise CollectorExecutionError(
+                    f"Prohibited redirect destination: non-public IP literal '{hostname}'"
+                )
+        except ValueError:
+            pass
+
+        # Registry allowlist check
+        if self.allowed_hosts:
+            is_allowed = (
+                hostname in self.allowed_hosts
+                or any(hostname.endswith("." + h) for h in self.allowed_hosts)
+            )
+            if not is_allowed:
+                raise CollectorExecutionError(
+                    f"Prohibited redirect destination: untrusted host '{hostname}' "
+                    "not in authorized RDAP registry allowlist"
+                )
 
     def _safe_fetch(self, url: str) -> tuple[int, dict[str, Any], str]:
         """Fetch RDAP JSON with redirect validation, size checks, and timeout protection."""
-        self._apply_rate_limit()
-
         headers = {
             "Accept": "application/rdap+json, application/json",
             "User-Agent": "TraceGraph/0.2.0 (Defensive Intelligence Platform; +https://tracegraph.org)",
@@ -100,19 +185,64 @@ class RDAPCollector(BaseCollector):
         current_url = url
         redirect_count = 0
         max_redirects = 3
+        visited_urls: set[str] = set()
 
         try:
             while redirect_count <= max_redirects:
-                # Validate scheme
-                parsed = urlparse(current_url)
-                if parsed.scheme.lower() != "https":
+                # 1. Circular redirect check
+                if current_url in visited_urls:
                     raise CollectorExecutionError(
-                        f"Insecure redirect rejected: RDAP endpoints must use HTTPS ({current_url})"
+                        f"Circular redirect loop detected: '{current_url}' visited multiple times"
                     )
+                visited_urls.add(current_url)
 
-                # Execute request
+                # 2. Validate scheme, SSRF, and destination host
+                self._validate_destination_url(current_url)
+
+                # 3. Apply rate limit before every outbound request (initial + redirect hops)
+                self._apply_rate_limit()
+
+                # 4. Stream response to enforce size limits while downloading
                 try:
-                    resp = client.get(current_url, headers=headers)
+                    with client.stream("GET", current_url, headers=headers) as resp:
+                        # Handle redirects
+                        if resp.status_code in (301, 302, 307, 308):
+                            loc = resp.headers.get("Location")
+                            if not loc:
+                                raise CollectorExecutionError(
+                                    f"RDAP redirect HTTP {resp.status_code} missing Location"
+                                )
+                            new_url = urljoin(current_url, loc)
+                            redirect_count += 1
+                            current_url = new_url
+                            continue
+
+                        # Check Content-Length header upfront if present
+                        content_len = resp.headers.get("Content-Length")
+                        if content_len:
+                            try:
+                                if int(content_len) > MAX_RDAP_RESPONSE_BYTES:
+                                    limit_kb = MAX_RDAP_RESPONSE_BYTES // 1024
+                                    raise CollectorExecutionError(
+                                        f"RDAP response exceeds limit ({limit_kb} KB)"
+                                    )
+                            except ValueError:
+                                pass
+
+                        # Stream body chunks with strict byte limit
+                        body_chunks: list[bytes] = []
+                        total_bytes = 0
+                        for chunk in resp.iter_bytes(chunk_size=8192):
+                            total_bytes += len(chunk)
+                            if total_bytes > MAX_RDAP_RESPONSE_BYTES:
+                                raise CollectorExecutionError(
+                                    f"RDAP response exceeds limit ({MAX_RDAP_RESPONSE_BYTES} bytes)"
+                                )
+                            body_chunks.append(chunk)
+
+                        body_bytes = b"".join(body_chunks)
+                        status_code = resp.status_code
+
                 except httpx.TimeoutException as e:
                     raise CollectorTimeoutError(
                         f"RDAP request to '{current_url}' timed out: {e}"
@@ -122,47 +252,26 @@ class RDAPCollector(BaseCollector):
                         f"RDAP network error for '{current_url}': {e}"
                     ) from e
 
-                # Handle redirect
-                if resp.status_code in (301, 302, 307, 308):
-                    loc = resp.headers.get("Location")
-                    if not loc:
-                        raise CollectorExecutionError(
-                            f"RDAP server returned HTTP {resp.status_code} without Location header"
-                        )
-                    redirect_count += 1
-                    current_url = loc
-                    continue
-
-                # Check response size limit
-                content_len = resp.headers.get("Content-Length")
-                if content_len and int(content_len) > MAX_RDAP_RESPONSE_BYTES:
-                    raise CollectorExecutionError(
-                        f"RDAP response exceeds limit ({MAX_RDAP_RESPONSE_BYTES} bytes)"
-                    )
-
-                body_bytes = resp.content
-                if len(body_bytes) > MAX_RDAP_RESPONSE_BYTES:
-                    raise CollectorExecutionError(
-                        f"RDAP response exceeds limit ({MAX_RDAP_RESPONSE_BYTES} bytes)"
-                    )
-
-                if resp.status_code == 404:
+                if status_code == 404:
                     return 404, {}, current_url
 
-                if resp.status_code == 429:
+                if status_code == 429:
                     raise CollectorExecutionError(
                         f"RDAP rate limit exceeded (HTTP 429) at '{current_url}'"
                     )
 
-                if resp.status_code >= 400:
+                if status_code >= 400:
                     raise CollectorExecutionError(
-                        f"RDAP query failed with HTTP {resp.status_code} at '{current_url}'"
+                        f"RDAP query failed with HTTP {status_code} at '{current_url}'"
                     )
 
                 # Parse JSON
                 try:
-                    data = resp.json()
-                    return resp.status_code, data, current_url
+                    text_payload = body_bytes.decode("utf-8", errors="replace")
+                    data = json.loads(text_payload)
+                    if not isinstance(data, dict):
+                        raise ValueError("RDAP root payload must be a JSON object")
+                    return status_code, data, current_url
                 except Exception as e:
                     raise CollectorExecutionError(
                         f"Malformed JSON returned by RDAP server '{current_url}': {e}"

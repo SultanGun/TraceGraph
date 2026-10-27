@@ -72,10 +72,12 @@ TraceGraph is a defensive OSINT infrastructure intelligence platform designed fo
   - `tracegraph status` explicitly displays only workspace paths and counter metrics. It **never** dumps environment variables or auth tokens.
 
 ### 3.7 SSRF & Private Network Enumeration Protection
-- **Threat:** Malicious target inputs (e.g. `127.0.0.1`, `169.254.169.254`, `10.0.0.1`, `::1`) attempting Server-Side Request Forgery against cloud metadata endpoints or local internal services via RDAP or DNS collectors.
+- **Threat:** Malicious target inputs (e.g. `127.0.0.1`, `169.254.169.254`, `10.0.0.1`, `::1`, `::ffff:127.0.0.1`) attempting Server-Side Request Forgery against cloud metadata endpoints or local internal services via RDAP or DNS collectors.
 - **Mitigation:**
   - `src/tracegraph/core/scope.py` implements strict RFC checking (`is_public_ip` and `assert_public_ip`).
-  - Blocks RFC 1918 private subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), RFC 6890 loopbacks (`127.0.0.0/8`, `::1/128`), RFC 3927 link-local addresses (`169.254.0.0/16`), RFC 6598 carrier-grade NAT (`100.64.0.0/10`), RFC 5737 documentation test networks (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`), unique local IPv6 (`fc00::/7`), and multicast ranges.
+  - Blocks RFC 1918 private subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), RFC 6890 loopbacks (`127.0.0.0/8`, `::1/128`), RFC 3927 link-local addresses (`169.254.0.0/16`), RFC 6598 carrier-grade NAT (`100.64.0.0/10`), RFC 5737 documentation test networks (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`), unique local IPv6 (`fc00::/7`), link-local IPv6 (`fe80::/10`), and multicast ranges (`224.0.0.0/4`, `ff00::/8`).
+  - Explicitly detects and extracts IPv4-mapped IPv6 addresses (`::ffff:x.x.x.x`), validating the embedded IPv4 address against disallowed network boundaries.
+  - Rejects inputs without valid IP delimiters (`.` or `:`) to block integer or octal IP encoding bypasses.
   - Collector input validation rejects non-public targets immediately before any network socket or HTTP request is initiated.
 
 ### 3.8 Scope Escapes & Target Boundary Enforcement
@@ -83,6 +85,7 @@ TraceGraph is a defensive OSINT infrastructure intelligence platform designed fo
 - **Mitigation:**
   - Every collection run requires an active investigation.
   - `ScopeValidator` enforces that targets strictly match the declared scope (exact domain, subdomain wildcard `*.domain.com`, IP, CIDR block, or explicit unrestricted `*`).
+  - Safely handles CIDR cross-version evaluations (IPv4 CIDR vs IPv6 network) without throwing unhandled TypeErrors.
   - Target out of scope causes immediate command termination with exit code 1 prior to collector instantiation.
 
 ### 3.9 Personal Data Minimization (PII Sanitization)
@@ -93,13 +96,35 @@ TraceGraph is a defensive OSINT infrastructure intelligence platform designed fo
   - Preserves only public organization/network handles, entity roles, CIDR ranges, and registration dates.
   - Never invents ownership or registration claims without explicit registry data.
 
-### 3.10 Insecure Redirect & Response Flood Protection
-- **Threat:** Malicious RDAP or DNS redirect chains routing requests to insecure HTTP endpoints or returning multi-megabyte payloads to exhaust memory.
+### 3.10 Insecure Redirect, SSRF & Response Flood Protection
+- **Threat:** Malicious RDAP redirect chains routing requests to insecure HTTP endpoints, internal services, cloud metadata services, circular loops, or returning multi-megabyte payloads to exhaust memory.
 - **Mitigation:**
-  - Enforces HTTPS-only scheme on all RDAP redirect targets (`Location` headers).
-  - Maximum redirect limit of 3.
-  - Response size hard limit capped at 512 KB (`Content-Length` and received byte inspection).
-  - Conservative rate-limiting delay between requests.
+  - **Redirect Policy:**
+    - Scheme must strictly be `https`.
+    - Relative URLs are safely resolved via `urljoin(current_url, loc)`.
+    - Destination hostnames are validated prior to connection: rejects `localhost`, internal domain suffixes (`.local`, `.internal`, `.lan`, `.home.arpa`), and non-public IP literals.
+    - Redirect destination host must match an allowed authoritative RDAP registry list (`rdap.arin.net`, `rdap.ripe.net`, `rdap.apnic.net`, `rdap.lacnic.net`, `rdap.afrinic.net`, `rdap.iana.org`, `data.iana.org`, `rdap.nic.mil`) or the operator's configured bootstrap host.
+    - Circular redirect detection: tracks visited URLs and aborts immediately upon loop detection.
+    - Maximum redirect depth capped at 3 hops.
+  - **Streaming Response Size Enforcement:**
+    - Checks `Content-Length` header upfront; aborts if greater than 512 KB (`MAX_RDAP_RESPONSE_BYTES`).
+    - Uses `client.stream("GET", ...)` to read data in 8 KB chunks. Running byte count is evaluated per chunk; connection is severed immediately if bytes exceed 512 KB, preventing memory exhaustion attacks from chunked responses or misleading headers.
+  - **Rate Limiting:**
+    - Conservative delay enforced before *every* outbound request, including each individual redirect hop.
+    - Throttling protected by a thread-safe mutex lock.
+  - **Database Integrity Invariant:**
+    - If collection outcome is `FAILED` or `TIMEOUT`, the observation is recorded for provenance audit, but **zero** entity relationships are created or linked.
+
+---
+
+## 4. Known Architectural Limitations & Residual Risks
+
+1. **DNS Rebinding in Standard HTTP Client:**
+   While TraceGraph validates hostnames against allowlists and validates IP literals before connection, standard user-space HTTP clients (such as HTTPX) rely on the operating system resolver during socket connect. An authorized host whose DNS records are maliciously poisoned or dynamically changed between lookup and socket creation cannot be completely mitigated without custom TCP transport socket-level IP pinning.
+2. **Bootstrap Availability:**
+   TraceGraph defaults to the ARIN RFC 7484 bootstrap endpoint. If this endpoint is unreachable or returning HTTP 5xx errors, lookups will fail gracefully with a timeout or network error rather than silent data corruption. Operators should configure alternative or local mirror endpoints via `--bootstrap-url` in restricted enterprise networks.
+3. **Unrestricted Scope Flag (`*`):**
+   Investigations created with `--scope "*"` or legacy v0.1 migrations explicitly permit collection against any public target. Operators must exercise caution to ensure investigations are scoped to authorized assets. Target SSRF and private IP protections remain enforced even under unrestricted scope.
 
 ---
 

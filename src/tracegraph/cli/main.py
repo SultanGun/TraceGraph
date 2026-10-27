@@ -484,20 +484,23 @@ def collect_cmd(
         )
 
         created_rel_count = 0
-        for disc_rel in result.discovered_relationships:
-            src_ent, _ = repo.get_or_create_entity(
-                disc_rel.source.entity_type, disc_rel.source.raw_value
-            )
-            tgt_ent, _ = repo.get_or_create_entity(
-                disc_rel.target.entity_type, disc_rel.target.raw_value
-            )
-            rel, _ = repo.create_relationship(src_ent.id, tgt_ent.id, disc_rel.relationship_type)
-            repo.link_evidence(
-                relationship_id=rel.id,
-                observation_id=obs.id,
-                notes=f"Discovered by {result.collector_name} from {result.source_reference}",
-            )
-            created_rel_count += 1
+        if result.status == CollectionStatus.SUCCESS:
+            for disc_rel in result.discovered_relationships:
+                src_ent, _ = repo.get_or_create_entity(
+                    disc_rel.source.entity_type, disc_rel.source.raw_value
+                )
+                tgt_ent, _ = repo.get_or_create_entity(
+                    disc_rel.target.entity_type, disc_rel.target.raw_value
+                )
+                rel, _ = repo.create_relationship(
+                    src_ent.id, tgt_ent.id, disc_rel.relationship_type
+                )
+                repo.link_evidence(
+                    relationship_id=rel.id,
+                    observation_id=obs.id,
+                    notes=f"Discovered by {result.collector_name} from {result.source_reference}",
+                )
+                created_rel_count += 1
 
     except Exception as e:
         err_console.print(

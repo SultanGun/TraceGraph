@@ -14,7 +14,11 @@ from tracegraph.collectors.base import (
     DiscoveredRelationship,
 )
 from tracegraph.core.enums import CollectionStatus, EntityType, RelationshipType
-from tracegraph.core.exceptions import CollectorExecutionError, CollectorTimeoutError
+from tracegraph.core.exceptions import (
+    CollectorExecutionError,
+    CollectorTimeoutError,
+    CollectorValidationError,
+)
 from tracegraph.core.normalizers import normalize_domain, normalize_ipv4, normalize_ipv6
 
 logger = logging.getLogger(__name__)
@@ -41,6 +45,20 @@ class LiveDNSCollector(BaseCollector):
         self._custom_resolver = resolver
         self.nameservers = nameservers
         self.default_timeout = timeout
+
+    def validate_input(self, target: str, entity_type: EntityType | str) -> tuple[EntityType, str]:
+        """Validate domain name and reject special-use, loopback, and internal domains."""
+        typed_type, normalized = super().validate_input(target, entity_type)
+
+        clean = normalized.lower().rstrip(".")
+        disallowed_suffixes = (".localhost", ".local", ".internal", ".lan", ".home.arpa")
+        if clean == "localhost" or any(clean.endswith(s) for s in disallowed_suffixes):
+            raise CollectorValidationError(
+                f"Target '{target}' is a special-use, loopback, or internal domain. "
+                "Live DNS queries are only permitted for public internet infrastructure."
+            )
+
+        return typed_type, normalized
 
     def _get_resolver(self, timeout: float) -> dns.resolver.Resolver:
         if self._custom_resolver is not None:
