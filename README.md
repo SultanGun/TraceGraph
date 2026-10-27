@@ -6,17 +6,18 @@ TraceGraph is an open-source, local-first intelligence platform engineered for a
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![Status](https://img.shields.io/badge/status-alpha-orange.svg)]()
+[![Status](https://img.shields.io/badge/status-v0.2.0--alpha-orange.svg)]()
 
 ---
 
 ## 💡 Core Differentiators
 
-- **Evidence Provenance:** Every observation explicitly records the originating collector identity, version, source reference, observation timestamp, and ingestion timestamp in UTC. Unsupported relationships are never presented as verified.
-- **Reproducible Investigations:** Collection runs, configuration scopes, and discrete entity linkages are preserved in local SQLite storage with enforced foreign-key integrity.
+- **Evidence Provenance:** Every observation explicitly records the originating collector identity, version, source reference, observation timestamp, and ingestion timestamp in UTC. Unsupported relationships are never presented as verified findings.
+- **Reproducible Investigations:** Collection runs, declared scope boundaries, and discrete entity linkages are preserved in local SQLite storage with enforced foreign-key integrity.
+- **Strict Scope Boundaries:** Target scopes (domains, wildcards, CIDRs, IPs) are validated prior to initiating network queries.
+- **Defensive & Privacy-Preserving:** Bounded collection with SSRF defense (blocking private, loopback, and reserved ranges), rate limiting, and automated vCard PII sanitization.
 - **Temporal Intelligence:** Clean separation between observation time (when raw telemetry was observed) and ingestion time (when records entered storage), providing snapshot comparison capabilities.
 - **AI-Ready Architecture:** Designed from the ground up so that future AI reasoning modules must cite verifiable database evidence rather than hallucinating infrastructure links.
-- **Defensive & Local-First:** Operates completely offline by default. Zero telemetry, zero external network calls during initialization, and zero credential collection.
 
 ---
 
@@ -24,7 +25,7 @@ TraceGraph is an open-source, local-first intelligence platform engineered for a
 
 ### Prerequisites
 
-- Python 3.12 or higher (Python 3.14 compatible)
+- Python 3.12 or higher (tested with Python 3.12, 3.13, and 3.14)
 - SQLite 3.35+ (standard with Python)
 
 ### Installation
@@ -35,7 +36,7 @@ Install in editable development mode from the repository root:
 pip install -e .
 ```
 
-To install development dependencies (pytest, ruff):
+To install development dependencies (pytest, pytest-cov, ruff):
 
 ```bash
 pip install -e ".[dev]"
@@ -43,70 +44,97 @@ pip install -e ".[dev]"
 
 ---
 
-## 🛠️ CLI Usage
+## 🛠️ CLI Workflow
 
 TraceGraph provides a modern CLI interface powered by Typer and Rich.
 
-### Check Version
+### 1. Initialize Workspace
 
-```bash
-tracegraph version
-# Output: TraceGraph v0.1.0-alpha
-```
-
-Or view CLI help options:
-
-```bash
-tracegraph --help
-```
-
-### Initialize Workspace
-
-Create a new local investigation workspace and initialize the SQLite evidence database:
+Create a new local investigation workspace and initialize the SQLite evidence database (schema v2.0.0):
 
 ```bash
 # Initialize default workspace in .tracegraph/
 tracegraph init
 
-# Or specify a custom workspace directory
+# Or specify an explicit workspace directory
 tracegraph init --workspace /path/to/custom_workspace
 ```
 
-`tracegraph init` is safe and idempotent:
-- It creates required schema tables and metadata.
-- It will **never** overwrite or destroy an existing healthy database.
-- Rerunning `tracegraph init` against an initialized workspace safely confirms its current state.
+`tracegraph init` is idempotent and upgrades legacy v1.0.0 databases automatically.
 
-### Inspect Status
+### 2. Inspect Status
 
 Inspect workspace connectivity, database integrity, schema version, and entity counters:
 
 ```bash
-# Check default workspace
 tracegraph status
-
-# Check specific workspace
-tracegraph status --workspace /path/to/custom_workspace
 ```
 
-Example status table output:
+### 3. Create an Investigation Scope
 
-```text
-               TraceGraph System & Workspace Status               
-┏━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ Property              ┃ Value                                  ┃
-┡━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
-│ TraceGraph Version    │ v0.1.0-alpha                           │
-│ Workspace Directory   │ /path/to/workspace/.tracegraph         │
-│ Workspace Exists      │ Yes                                    │
-│ Database Path         │ /path/to/workspace/.tracegraph/traceg… │
-│ Database File Exists  │ Yes                                    │
-│ Database Connectivity │ CONNECTED (Foreign keys ON)            │
-│ Schema Status         │ INITIALIZED (Schema v1.0.0)            │
-│ Total Entities        │ 4                                      │
-│ Total Observations    │ 4                                      │
-│ Total Relationships   │ 3                                      │
-└───────────────────────┴────────────────────────────────────────┘
+Establish an investigation boundary with a declared target scope:
+
+```bash
+tracegraph investigate new "Incident-2026-Alpha" \
+  --scope "example.com, *.example.com, 93.184.215.0/24" \
+  --desc "Infrastructure assessment of target perimeters"
+```
+
+List existing investigations:
+
+```bash
+tracegraph investigate list
+```
+
+Inspect investigation details:
+
+```bash
+tracegraph investigate show <investigation-id>
+```
+
+### 4. Collect Evidence
+
+Execute bounded collectors against targets within the declared investigation scope:
+
+#### Live DNS Resolution (`live_dns`)
+Performs live DNS resolution for `A`, `AAAA`, `NS`, and `MX` records using configurable recursive resolvers:
+
+```bash
+tracegraph collect example.com --collector live_dns
+```
+
+> **Note:** DNS queries represent **live DNS resolution** directly against authoritative or configured resolvers, not historical passive DNS archives. Does not perform port scans, brute-force subdomain discovery, or exploitation.
+
+#### Bounded RDAP (`rdap`)
+Queries public IP address allocations via standards-compliant RFC 7484 bootstrap routing (ARIN bootstrap routing to RIPE, APNIC, LACNIC, and AFRINIC):
+
+```bash
+tracegraph collect 93.184.215.14 --collector rdap
+```
+
+> **Safety & Privacy:**
+> - Strictly refuses private, loopback, and reserved addresses (SSRF defense).
+> - Automatically strips individual personal data (`vcardArray`, contact names, personal phone numbers, and emails).
+> - Discovers CIDR block allocations and links them via `BELONGS_TO` relationships.
+> - Never invents ownership or registration claims without explicit registry data.
+
+#### Deterministic Mock Collector (`mock_dns`)
+Deterministic offline collector for verification and testing without network access:
+
+```bash
+tracegraph collect example.com --collector mock_dns
+```
+
+### 5. Generate Evidence-Backed Report
+
+Generate a Markdown investigation report containing metadata, declared scope, collected observations, entity discoveries, and verified relationship citations:
+
+```bash
+# Display report in terminal
+tracegraph report <investigation-id>
+
+# Export report directly to Markdown file
+tracegraph report <investigation-id> --output investigation_report.md
 ```
 
 ---
@@ -115,11 +143,11 @@ Example status table output:
 
 | Concept | Purpose | Integrity Rule |
 | :--- | :--- | :--- |
-| **Investigation** | Defines scope boundary, targets, and execution configuration. | Immutable created timestamp, unique identifier. |
-| **Entity** | Distinct infrastructure artifact (domain, IP, ASN, CIDR, etc.). | Strict normalization and unique `(entity_type, normalized_value)` constraint to prevent duplicate nodes. |
-| **Observation** | Concrete evidence collected by an identified collector. | Contains source reference, collector version, observation timestamp, and ingestion timestamp. |
-| **Relationship** | Directional link between two infrastructure entities (e.g., `RESOLVES_TO`). | Unique directional edge constraint. Foreign key cascade to entities. |
-| **Evidence Link** | Join table linking Relationships to supporting Observations. | **Provenance rule:** A relationship is only considered `verified` if backed by at least one observation. Unsupported links cannot be presented as verified findings. |
+| **Investigation** | Defines target scope boundary, targets, and execution configuration. | Immutable created timestamp, unique UUIDv4. |
+| **Entity** | Distinct infrastructure artifact (domain, IP, ASN, CIDR, etc.). | Strict normalization and unique `(entity_type, canonical_value)` constraint to prevent duplicate nodes. |
+| **Observation** | Concrete evidence collected by an identified collector. | Contains investigation reference, source reference, collector version, observation timestamp, and ingestion timestamp. |
+| **Relationship** | Directional link between two infrastructure entities (e.g., `RESOLVES_TO`, `BELONGS_TO`, `SERVED_BY`). | Unique directional edge constraint. Foreign key cascade to entities. |
+| **Evidence Link** | Join table linking Relationships to supporting Observations. | **Provenance rule:** A relationship is only considered `[VERIFIED]` if backed by at least one observation. Unsupported links are flagged `[UNVERIFIED]`. |
 
 ---
 

@@ -37,6 +37,9 @@ class InvestigationModel(TraceGraphBaseModel):
     id: str = Field(default_factory=generate_uuid, description="Unique UUID for investigation")
     name: str = Field(..., min_length=1, max_length=255, description="Investigation title or name")
     description: str | None = Field(default=None, description="Detailed scope or objective")
+    target_scope: str = Field(
+        default="", description="Declared target scope (domain, CIDR, or comma-separated targets)"
+    )
     created_at: datetime = Field(
         default_factory=utc_now, description="Investigation creation timestamp in UTC"
     )
@@ -94,6 +97,9 @@ class ObservationModel(TraceGraphBaseModel):
 
     id: str = Field(default_factory=generate_uuid, description="Unique UUID for observation")
     entity_id: str = Field(..., min_length=1, description="Target entity UUID")
+    investigation_id: str | None = Field(
+        default=None, description="Associated investigation UUID for this observation"
+    )
     collector_name: str = Field(
         ..., min_length=1, max_length=100, description="Unique name of collector"
     )

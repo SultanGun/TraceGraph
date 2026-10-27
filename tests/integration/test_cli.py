@@ -4,11 +4,12 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
+import tracegraph
 from tracegraph.cli.main import app
 from tracegraph.core.enums import EntityType
 from tracegraph.storage.database import create_session_factory, create_storage_engine
 from tracegraph.storage.repository import EvidenceRepository
-from tracegraph.storage.workspace import DEFAULT_DB_FILENAME
+from tracegraph.storage.workspace import CURRENT_SCHEMA_VERSION, DEFAULT_DB_FILENAME
 
 runner = CliRunner()
 
@@ -25,12 +26,12 @@ class TestCLICommands:
     def test_version_command(self):
         result = runner.invoke(app, ["version"])
         assert result.exit_code == 0
-        assert "TraceGraph v0.1.0-alpha" in result.stdout
+        assert f"TraceGraph v{tracegraph.__version__}" in result.stdout
 
     def test_version_flag(self):
         result = runner.invoke(app, ["--version"])
         assert result.exit_code == 0
-        assert "TraceGraph v0.1.0-alpha" in result.stdout
+        assert f"TraceGraph v{tracegraph.__version__}" in result.stdout
 
     def test_status_uninitialized_workspace(self, tmp_path: Path):
         ws_dir = tmp_path / "uninit_ws"
@@ -46,7 +47,7 @@ class TestCLICommands:
         init_res = runner.invoke(app, ["init", "--workspace", str(ws_dir)])
         assert init_res.exit_code == 0
         assert "Workspace ready" in init_res.stdout
-        assert "Schema version: 1.0.0" in init_res.stdout
+        assert f"Schema version: {CURRENT_SCHEMA_VERSION}" in init_res.stdout
 
         # Verify database file created
         db_path = ws_dir / DEFAULT_DB_FILENAME
@@ -57,7 +58,7 @@ class TestCLICommands:
         assert status_res.exit_code == 0
         assert "CONNECTED" in status_res.stdout
         assert "INITIALIZED" in status_res.stdout
-        assert "Schema v1.0.0" in status_res.stdout
+        assert f"Schema v{CURRENT_SCHEMA_VERSION}" in status_res.stdout
 
         # 3. Repeated init (Idempotency)
         repeat_res = runner.invoke(app, ["init", "--workspace", str(ws_dir)])

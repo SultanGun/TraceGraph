@@ -26,6 +26,7 @@ class RelationshipType(StrEnum):
     SERVED_BY = "SERVED_BY"
     CERTIFIED_BY = "CERTIFIED_BY"
     ASSOCIATED_WITH = "ASSOCIATED_WITH"
+    MAIL_EXCHANGER_FOR = "MAIL_EXCHANGER_FOR"
 
 
 class CollectionStatus(StrEnum):

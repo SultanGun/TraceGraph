@@ -1,4 +1,4 @@
-"""Collector interface and deterministic synthetic implementations."""
+"""Collector interface, live resolvers, and deterministic synthetic implementations."""
 
 from tracegraph.collectors.base import (
     BaseCollector,
@@ -6,7 +6,9 @@ from tracegraph.collectors.base import (
     DiscoveredEntity,
     DiscoveredRelationship,
 )
+from tracegraph.collectors.dns import LiveDNSCollector
 from tracegraph.collectors.mock import MockDNSCollector
+from tracegraph.collectors.rdap import RDAPCollector
 
 __all__ = [
     "BaseCollector",
@@ -14,4 +16,6 @@ __all__ = [
     "DiscoveredEntity",
     "DiscoveredRelationship",
     "MockDNSCollector",
+    "LiveDNSCollector",
+    "RDAPCollector",
 ]

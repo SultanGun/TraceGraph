@@ -8,6 +8,11 @@ from tracegraph.storage.database import (
     init_database,
     session_scope,
 )
+from tracegraph.storage.migrations import (
+    LATEST_SCHEMA_VERSION,
+    apply_migrations,
+    get_current_schema_version,
+)
 from tracegraph.storage.repository import EvidenceRepository
 from tracegraph.storage.schema import (
     Base,
@@ -48,4 +53,7 @@ __all__ = [
     "resolve_workspace_path",
     "get_workspace_status",
     "init_workspace",
+    "LATEST_SCHEMA_VERSION",
+    "apply_migrations",
+    "get_current_schema_version",
 ]

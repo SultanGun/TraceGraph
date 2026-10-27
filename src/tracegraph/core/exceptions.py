@@ -29,8 +29,16 @@ class NotFoundError(DatabaseError):
     """Raised when an expected database record is not found."""
 
 
+class MigrationError(DatabaseError):
+    """Raised when database schema migration fails."""
+
+
 class ModelValidationError(TraceGraphError):
     """Raised when model inputs or entities fail domain validation."""
+
+
+class ScopeError(TraceGraphError):
+    """Raised when target or operation falls outside authorized investigation scope."""
 
 
 class CollectorError(TraceGraphError):

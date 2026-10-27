@@ -12,6 +12,7 @@ erDiagram
         string id PK
         string name
         string description
+        string target_scope
         datetime created_at
         json config_metadata
     }
@@ -20,13 +21,14 @@ erDiagram
         string id PK
         string entity_type
         string raw_value
-        string normalized_value
+        string canonical_value
         datetime created_at
     }
 
     OBSERVATION {
         string id PK
         string entity_id FK
+        string investigation_id FK
         string collector_name
         string collector_version
         string source_reference
@@ -59,6 +61,7 @@ erDiagram
         datetime updated_at
     }
 
+    INVESTIGATION ||--o{ OBSERVATION : "contains"
     ENTITY ||--o{ OBSERVATION : "is observed by"
     ENTITY ||--o{ RELATIONSHIP : "is source of"
     ENTITY ||--o{ RELATIONSHIP : "is target of"
@@ -78,6 +81,7 @@ Tracks discrete scoping boundaries and investigation parameters.
 | `id` | VARCHAR(36) | NO | Primary Key (UUIDv4). |
 | `name` | VARCHAR(255) | NO | Investigation title or reference code. |
 | `description` | TEXT | YES | Objective, scope notes, or incident ticket. |
+| `target_scope` | TEXT | NO | Declared target scope definition (e.g. `example.com, 93.184.215.0/24`). Default `""` (unrestricted). |
 | `created_at` | DATETIME | NO | UTC creation timestamp. |
 | `config_metadata`| JSON | NO | Parameters, allowed target scopes, and tags. |
 
@@ -89,12 +93,12 @@ Represents infrastructure nodes.
 | `id` | VARCHAR(36) | NO | Primary Key (UUIDv4). |
 | `entity_type` | VARCHAR(50) | NO | Classification (`DOMAIN`, `IPV4`, `IPV6`, `ASN`, `CIDR`, `NAMESERVER`, etc.). |
 | `raw_value` | VARCHAR(1024) | NO | Original input as provided by user or collector. |
-| `normalized_value` | VARCHAR(1024) | NO | Canonicalized representation used for deduplication. |
+| `canonical_value` | VARCHAR(1024) | NO | Canonicalized representation used for deduplication. |
 | `created_at` | DATETIME | NO | UTC registration timestamp. |
 
 **Constraints & Indexes:**
-- `UNIQUE(entity_type, normalized_value)`: Prevents duplicate entity insertion across the workspace.
-- `INDEX(entity_type, normalized_value)`: Fast lookup during ingestion.
+- `UNIQUE(entity_type, canonical_value)`: Prevents duplicate entity insertion across the workspace.
+- `INDEX(entity_type, canonical_value)`: Fast lookup during ingestion.
 
 ### 2.3 `observations`
 Discrete evidence collected from an identified source.
@@ -103,9 +107,10 @@ Discrete evidence collected from an identified source.
 | :--- | :--- | :--- | :--- |
 | `id` | VARCHAR(36) | NO | Primary Key (UUIDv4). |
 | `entity_id` | VARCHAR(36) | NO | Foreign Key to `entities.id` (ON DELETE CASCADE). |
-| `collector_name` | VARCHAR(100) | NO | Collector identity (e.g. `mock_dns`). |
+| `investigation_id` | VARCHAR(36) | YES | Foreign Key to `investigations.id` (ON DELETE CASCADE). Indexed. |
+| `collector_name` | VARCHAR(100) | NO | Collector identity (e.g. `live_dns`, `rdap`, `mock_dns`). |
 | `collector_version`| VARCHAR(50) | NO | Collector semver version. |
-| `source_reference` | VARCHAR(1024) | NO | Provenance URI, synthetic fixture, or file path. |
+| `source_reference` | VARCHAR(1024) | NO | Provenance URI, resolver, or registry URL. |
 | `observed_at` | DATETIME | NO | UTC timestamp when observed at source. |
 | `ingested_at` | DATETIME | NO | UTC timestamp when stored locally. |
 | `data` | JSON | NO | Raw structured telemetry payload. |
@@ -173,3 +178,23 @@ Key-value workspace configuration and schema state.
 | `CIDR` | ` 192.168.1.1/24 ` | `192.168.1.0/24` | Network representation via `ipaddress.ip_network(strict=False)`. |
 | `NAMESERVER` | ` NS1.EXAMPLE.COM ` | `ns1.example.com` | Lowercase FQDN. |
 | `CERTIFICATE`| ` aa:bb:cc:dd ` | `AABBCCDD` | Strip colons/spaces, uppercase hex fingerprint. |
+
+---
+
+## 5. Schema Versioning & Migrations
+
+TraceGraph uses explicit, versioned relational schema tracking via the `metadata` table.
+
+### Schema Version History
+- **v1.0.0 (v0.1.0-alpha):** Initial foundation with unassociated observations and implicit investigation boundaries.
+- **v2.0.0 (v0.2.0-alpha):** Added `target_scope` column to `investigations` and `investigation_id` column to `observations`.
+
+### Migration Mechanics (`src/tracegraph/storage/migrations.py`)
+- Upgrading from v1.0.0 to v2.0.0 is executed within a database transaction:
+  1. Inspects existing table columns to avoid duplicate alterations.
+  2. Executes `ALTER TABLE investigations ADD COLUMN target_scope TEXT NOT NULL DEFAULT ''`.
+  3. Executes `ALTER TABLE observations ADD COLUMN investigation_id VARCHAR(36) REFERENCES investigations(id) ON DELETE CASCADE`.
+  4. Builds index `idx_observations_investigation_id` on `observations(investigation_id)`.
+  5. Backfills any legacy observations where `investigation_id IS NULL` by inserting and linking them to an auto-created `legacy-v0.1-investigation` scope boundary (`target_scope = '*'`).
+  6. Updates `metadata` record `schema_version` to `'2.0.0'`.
+- Migrations are automatically applied whenever `tracegraph init` or workspace verification runs on an existing v1 database. Zero data loss is guaranteed.
