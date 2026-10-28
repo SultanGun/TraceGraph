@@ -81,6 +81,78 @@ def create_v1_database(engine):
         )
 
 
+def create_v2_database(engine):
+    """Set up an exact SQLite database matching TraceGraph v0.2.0-alpha (schema v2.0.0)."""
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "CREATE TABLE metadata ("
+                "key VARCHAR(64) PRIMARY KEY, "
+                "value TEXT NOT NULL, "
+                "updated_at TEXT NOT NULL"
+                ");"
+            )
+        )
+        now_iso = datetime.now(UTC).isoformat()
+        conn.execute(
+            text(
+                "INSERT INTO metadata (key, value, updated_at) "
+                "VALUES ('schema_version', '2.0.0', :now);"
+            ),
+            {"now": now_iso},
+        )
+
+        conn.execute(
+            text(
+                "CREATE TABLE investigations ("
+                "id VARCHAR(36) PRIMARY KEY, "
+                "name VARCHAR(255) NOT NULL, "
+                "description TEXT, "
+                "target_scope TEXT NOT NULL DEFAULT '', "
+                "created_at DATETIME NOT NULL, "
+                "config_metadata JSON NOT NULL DEFAULT '{}'"
+                ");"
+            )
+        )
+
+        conn.execute(
+            text(
+                "CREATE TABLE entities ("
+                "id VARCHAR(36) PRIMARY KEY, "
+                "entity_type VARCHAR(50) NOT NULL, "
+                "raw_value VARCHAR(1024) NOT NULL, "
+                "normalized_value VARCHAR(1024) NOT NULL, "
+                "created_at DATETIME NOT NULL, "
+                "CONSTRAINT uq_entity_type_normalized_value UNIQUE (entity_type, normalized_value)"
+                ");"
+            )
+        )
+
+        conn.execute(
+            text(
+                "CREATE TABLE observations ("
+                "id VARCHAR(36) PRIMARY KEY, "
+                "entity_id VARCHAR(36) NOT NULL REFERENCES entities(id) ON DELETE CASCADE, "
+                "investigation_id VARCHAR(36) REFERENCES investigations(id) ON DELETE CASCADE, "
+                "collector_name VARCHAR(100) NOT NULL, "
+                "collector_version VARCHAR(50) NOT NULL, "
+                "source_reference VARCHAR(1024) NOT NULL, "
+                "observed_at DATETIME NOT NULL, "
+                "ingested_at DATETIME NOT NULL, "
+                "data JSON NOT NULL DEFAULT '{}', "
+                "status VARCHAR(20) NOT NULL, "
+                "error_details JSON"
+                ");"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX idx_observations_investigation_id "
+                "ON observations(investigation_id);"
+            )
+        )
+
+
 class TestMigrations:
     """Test suite for schema migrations."""
 
@@ -98,7 +170,7 @@ class TestMigrations:
         with pytest.raises(MigrationError, match="Cannot migrate uninitialized"):
             apply_migrations(engine)
 
-    def test_migrate_v1_to_v2_success(self, tmp_path):
+    def test_migrate_v1_to_v3_success(self, tmp_path):
         db_path = tmp_path / "v1.db"
         engine = create_engine(f"sqlite:///{db_path}")
         create_v1_database(engine)
@@ -132,8 +204,8 @@ class TestMigrations:
         # Execute migration
         new_version = apply_migrations(engine)
         assert new_version == LATEST_SCHEMA_VERSION
-        assert new_version == "2.0.0"
-        assert get_current_schema_version(engine) == "2.0.0"
+        assert new_version == "3.0.0"
+        assert get_current_schema_version(engine) == "3.0.0"
 
         # Verify investigations table has target_scope
         with engine.connect() as conn:
@@ -167,14 +239,54 @@ class TestMigrations:
             assert inv_row is not None
             assert inv_row[1] == "*"
 
+            # Verify snapshots table exists
+            snap_check = conn.execute(
+                text("SELECT name FROM sqlite_master WHERE type='table' AND name='snapshots';")
+            ).scalar()
+            assert snap_check == "snapshots"
+
+            snap_idx_rows = conn.execute(text("PRAGMA index_list(snapshots);")).fetchall()
+            snap_indexes = [row[1] for row in snap_idx_rows]
+            assert "idx_snapshots_investigation_id" in snap_indexes
+            assert "idx_snapshots_created_at" in snap_indexes
+            assert "idx_snapshots_content_digest" in snap_indexes
+
+    def test_migrate_v2_to_v3_success(self, tmp_path):
+        db_path = tmp_path / "v2.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        create_v2_database(engine)
+
+        assert get_current_schema_version(engine) == "2.0.0"
+
+        new_version = apply_migrations(engine)
+        assert new_version == "3.0.0"
+        assert get_current_schema_version(engine) == "3.0.0"
+
+        with engine.connect() as conn:
+            snap_check = conn.execute(
+                text("SELECT name FROM sqlite_master WHERE type='table' AND name='snapshots';")
+            ).scalar()
+            assert snap_check == "snapshots"
+
+            idx_rows = conn.execute(text("PRAGMA index_list(snapshots);")).fetchall()
+            indexes = [row[1] for row in idx_rows]
+            assert "idx_snapshots_investigation_id" in indexes
+            assert "idx_snapshots_created_at" in indexes
+            assert "idx_snapshots_content_digest" in indexes
+
     def test_apply_migrations_idempotency(self, tmp_path):
         db_path = tmp_path / "v1.db"
         engine = create_engine(f"sqlite:///{db_path}")
         create_v1_database(engine)
 
         v_first = apply_migrations(engine)
-        assert v_first == "2.0.0"
+        assert v_first == "3.0.0"
 
         # Second call should be a no-op
         v_second = apply_migrations(engine)
-        assert v_second == "2.0.0"
+        assert v_second == "3.0.0"
+
+        with engine.connect() as conn:
+            idx_rows = conn.execute(text("PRAGMA index_list(snapshots);")).fetchall()
+            indexes = [row[1] for row in idx_rows]
+            assert "idx_snapshots_content_digest" in indexes

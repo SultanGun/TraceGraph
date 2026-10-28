@@ -15,10 +15,22 @@ from tracegraph.collectors.dns import LiveDNSCollector
 from tracegraph.collectors.mock import MockDNSCollector
 from tracegraph.collectors.rdap import RDAPCollector
 from tracegraph.core.enums import CollectionStatus, EntityType
-from tracegraph.core.exceptions import NotFoundError, ScopeError, WorkspaceError
+from tracegraph.core.exceptions import (
+    AmbiguousSnapshotError,
+    CrossInvestigationDiffError,
+    NotFoundError,
+    ScopeError,
+    WorkspaceError,
+)
 from tracegraph.core.scope import ScopeValidator
 from tracegraph.evidence.models import RelationshipModel
 from tracegraph.reports.formatter import generate_markdown_report
+from tracegraph.snapshots.engine import diff_snapshots
+from tracegraph.snapshots.exporter import (
+    format_diff_console,
+    format_diff_json,
+    format_diff_markdown,
+)
 from tracegraph.storage.database import create_session_factory, create_storage_engine
 from tracegraph.storage.repository import EvidenceRepository
 from tracegraph.storage.workspace import (
@@ -42,6 +54,14 @@ investigate_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(investigate_app, name="investigate")
+
+snapshot_app = typer.Typer(
+    name="snapshot",
+    help="Capture immutable point-in-time evidence graph snapshots and compute diffs.",
+    add_completion=False,
+    no_args_is_help=True,
+)
+app.add_typer(snapshot_app, name="snapshot")
 
 console = Console()
 err_console = Console(stderr=True)
@@ -178,6 +198,7 @@ def status_cmd(
         table.add_row("Total Entities", str(status.entity_count))
         table.add_row("Total Observations", str(status.observation_count))
         table.add_row("Total Relationships", str(status.relationship_count))
+        table.add_row("Total Snapshots", str(status.snapshot_count))
     else:
         table.add_row(
             "Schema Status",
@@ -595,7 +616,6 @@ def report_cmd(
     investigation_obs_ids = {o.id for o in obs_list}
     relevant_rels: list[RelationshipModel] = []
     for r in all_rels:
-        # If relationship is substantiated by any observation in this investigation
         if any(oid in investigation_obs_ids for oid in r.supporting_observation_ids):
             relevant_rels.append(r)
 
@@ -626,6 +646,313 @@ def report_cmd(
             raise typer.Exit(code=1) from e
     else:
         console.print(Markdown(markdown_content))
+
+
+# =============================================================================
+# Snapshot Commands
+# =============================================================================
+
+
+@snapshot_app.command(
+    name="create",
+    help="Capture an immutable point-in-time evidence graph snapshot for an investigation.",
+)
+def snapshot_create_cmd(
+    investigation_id: str | None = typer.Argument(
+        None, help="Investigation UUID. If omitted and exactly 1 exists, it is selected."
+    ),
+    label: str | None = typer.Option(
+        None, "--label", "-l", help="Descriptive label (e.g. 'Baseline Scan')."
+    ),
+    workspace: Path | None = typer.Option(
+        None,
+        "--workspace",
+        "-w",
+        help="Explicit directory path for TraceGraph workspace.",
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+    ),
+) -> None:
+    """Capture an immutable snapshot of an investigation's evidence graph state."""
+    target_ws = resolve_workspace_path(workspace)
+    repo = _get_repo(target_ws)
+
+    # Resolve investigation
+    invs = repo.list_investigations()
+    selected_inv = None
+    if investigation_id:
+        try:
+            selected_inv = repo.get_investigation(investigation_id)
+        except NotFoundError:
+            err_console.print(
+                f"[bold red]Error:[/bold red] Investigation '{investigation_id}' not found."
+            )
+            raise typer.Exit(code=1)
+    else:
+        if len(invs) == 0:
+            err_console.print(
+                "[bold red]Workflow Error:[/bold red] No investigations exist in this workspace.\n"
+                "Create one first with:\n  "
+                "[bold cyan]tracegraph investigate new <name> --scope <target>[/bold cyan]"
+            )
+            raise typer.Exit(code=1)
+        if len(invs) == 1:
+            selected_inv = invs[0]
+            console.print(
+                f"[dim]Active investigation: {selected_inv.name} ({selected_inv.id[:8]})[/dim]"
+            )
+        else:
+            err_console.print(
+                "[bold red]Error:[/bold red] Multiple investigations exist. "
+                "Please specify one with: tracegraph snapshot create <investigation_id>"
+            )
+            table = Table(title="Available Investigations", show_lines=False)
+            table.add_column("ID", style="cyan")
+            table.add_column("Name", style="bold")
+            table.add_column("Scope", style="magenta")
+            for i in invs:
+                table.add_row(i.id, i.name, i.target_scope or "*")
+            err_console.print(table)
+            raise typer.Exit(code=1)
+
+    try:
+        snap = repo.create_snapshot(selected_inv.id, label=label)
+    except Exception as e:
+        err_console.print(f"[bold red]Snapshot Error:[/bold red] Failed creating snapshot: {e}")
+        raise typer.Exit(code=1) from e
+
+    created_str = snap.created_at.strftime("%Y-%m-%d %H:%M:%S")
+    console.print(
+        Panel(
+            f"[bold cyan]Snapshot ID:[/bold cyan] {snap.id}\n"
+            f"[bold cyan]Investigation:[/bold cyan] {selected_inv.name} ({selected_inv.id})\n"
+            f"[bold cyan]Label:[/bold cyan] {snap.label or 'None'}\n"
+            f"[bold cyan]Captured (UTC):[/bold cyan] {created_str}\n"
+            f"[bold cyan]Entities Captured:[/bold cyan] {snap.entity_count}\n"
+            f"[bold cyan]Relationships Captured:[/bold cyan] {snap.relationship_count}\n"
+            f"[bold cyan]Observations Captured:[/bold cyan] {snap.observation_count}\n"
+            f"[bold cyan]Digest (SHA-256):[/bold cyan]\n"
+            f"  [bold green]{snap.content_digest}[/bold green]",
+            title="[bold green]Investigation Snapshot Created[/bold green]",
+            border_style="green",
+        )
+    )
+
+
+@snapshot_app.command(name="list", help="List all snapshots in the workspace.")
+def snapshot_list_cmd(
+    investigation_id: str | None = typer.Option(
+        None, "--investigation", "-i", help="Filter snapshots by investigation UUID."
+    ),
+    workspace: Path | None = typer.Option(
+        None,
+        "--workspace",
+        "-w",
+        help="Explicit directory path for TraceGraph workspace.",
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+    ),
+) -> None:
+    """List all snapshots registered in this workspace."""
+    target_ws = resolve_workspace_path(workspace)
+    repo = _get_repo(target_ws)
+
+    snaps = repo.list_snapshots(investigation_id=investigation_id)
+    if not snaps:
+        console.print(
+            "[yellow]No snapshots found. Create one with "
+            "'tracegraph snapshot create <investigation_id>'.[/yellow]"
+        )
+        return
+
+    table = Table(title="Investigation Snapshots", show_lines=True)
+    table.add_column("Snapshot ID", style="cyan")
+    table.add_column("Label", style="bold white", no_wrap=True)
+    table.add_column("Investigation", style="magenta")
+    table.add_column("Created", style="dim")
+    table.add_column("Entities", justify="right")
+    table.add_column("Rels", justify="right")
+    table.add_column("Digest", style="green")
+
+    for s in snaps:
+        table.add_row(
+            s.id[:8],
+            s.label or "—",
+            s.investigation_id[:8],
+            s.created_at.strftime("%Y-%m-%d %H:%M"),
+            str(s.entity_count),
+            str(s.relationship_count),
+            s.content_digest[:8],
+        )
+
+    console.print(table)
+
+
+@snapshot_app.command(
+    name="show",
+    help="Display metadata and verify content digest for a snapshot.",
+)
+def snapshot_show_cmd(
+    snapshot_id: str = typer.Argument(..., help="Snapshot UUID to inspect."),
+    verify: bool = typer.Option(
+        False, "--verify", help="Recompute SHA-256 digest to verify content integrity."
+    ),
+    workspace: Path | None = typer.Option(
+        None,
+        "--workspace",
+        "-w",
+        help="Explicit directory path for TraceGraph workspace.",
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+    ),
+) -> None:
+    """Display detailed snapshot metadata and optionally verify integrity."""
+    target_ws = resolve_workspace_path(workspace)
+    repo = _get_repo(target_ws)
+
+    try:
+        snap = repo.get_snapshot(snapshot_id)
+    except AmbiguousSnapshotError as e:
+        err_console.print(f"[bold red]Ambiguity Error:[/bold red] {e}")
+        raise typer.Exit(code=1) from e
+    except NotFoundError:
+        err_console.print(f"[bold red]Error:[/bold red] Snapshot '{snapshot_id}' not found.")
+        raise typer.Exit(code=1)
+
+    integrity_badge = ""
+    if verify:
+        is_valid = repo.verify_snapshot_integrity(snapshot_id)
+        if is_valid:
+            integrity_badge = (
+                "\n[bold cyan]Integrity Status:[/bold cyan] "
+                "[bold green]VERIFIED (Digest matches canonical content)[/bold green]"
+            )
+        else:
+            integrity_badge = (
+                "\n[bold cyan]Integrity Status:[/bold cyan] "
+                "[bold red]CORRUPTED / TAMPERED (Digest mismatch!)[/bold red]"
+            )
+
+    created_str = snap.created_at.strftime("%Y-%m-%d %H:%M:%S")
+    console.print(
+        Panel(
+            f"[bold cyan]Snapshot ID:[/bold cyan] {snap.id}\n"
+            f"[bold cyan]Investigation ID:[/bold cyan] {snap.investigation_id}\n"
+            f"[bold cyan]Investigation Name:[/bold cyan] {snap.data.investigation_name}\n"
+            f"[bold cyan]Label:[/bold cyan] {snap.label or 'None'}\n"
+            f"[bold cyan]Schema Version:[/bold cyan] {snap.schema_version}\n"
+            f"[bold cyan]Captured (UTC):[/bold cyan] {created_str}\n"
+            f"[bold cyan]Content Digest (SHA-256):[/bold cyan] {snap.content_digest}\n"
+            f"[bold cyan]Total Entities:[/bold cyan] {snap.entity_count}\n"
+            f"[bold cyan]Total Relationships:[/bold cyan] {snap.relationship_count}\n"
+            f"[bold cyan]Total Observations:[/bold cyan] {snap.observation_count}"
+            f"{integrity_badge}",
+            title="[bold green]Snapshot Details[/bold green]",
+            border_style="green",
+        )
+    )
+
+
+@snapshot_app.command(
+    name="diff",
+    help="Compare two snapshots belonging to the same investigation.",
+)
+def snapshot_diff_cmd(
+    snapshot_a_id: str = typer.Argument(..., help="Baseline / earlier snapshot UUID."),
+    snapshot_b_id: str = typer.Argument(..., help="Target / later snapshot UUID."),
+    output_format: str = typer.Option(
+        "console", "--format", "-f", help="Output format: 'console', 'markdown' (or 'md'), 'json'."
+    ),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Optional file path to save Markdown or JSON diff export.",
+        file_okay=True,
+        dir_okay=False,
+        resolve_path=True,
+    ),
+    workspace: Path | None = typer.Option(
+        None,
+        "--workspace",
+        "-w",
+        help="Explicit directory path for TraceGraph workspace.",
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+    ),
+) -> None:
+    """Compare two snapshots and detect added, unobserved, and modified infrastructure."""
+    target_ws = resolve_workspace_path(workspace)
+    repo = _get_repo(target_ws)
+
+    try:
+        snap_a = repo.get_snapshot(snapshot_a_id)
+    except AmbiguousSnapshotError as e:
+        err_console.print(f"[bold red]Ambiguity Error (Snapshot A):[/bold red] {e}")
+        raise typer.Exit(code=1) from e
+    except NotFoundError:
+        err_console.print(f"[bold red]Error:[/bold red] Snapshot '{snapshot_a_id}' not found.")
+        raise typer.Exit(code=1)
+
+    try:
+        snap_b = repo.get_snapshot(snapshot_b_id)
+    except AmbiguousSnapshotError as e:
+        err_console.print(f"[bold red]Ambiguity Error (Snapshot B):[/bold red] {e}")
+        raise typer.Exit(code=1) from e
+    except NotFoundError:
+        err_console.print(f"[bold red]Error:[/bold red] Snapshot '{snapshot_b_id}' not found.")
+        raise typer.Exit(code=1)
+
+    try:
+        diff_result = diff_snapshots(snap_a, snap_b)
+    except CrossInvestigationDiffError as e:
+        err_console.print(f"[bold red]Comparison Error:[/bold red] {e}")
+        raise typer.Exit(code=1) from e
+    except Exception as e:
+        err_console.print(f"[bold red]Diff Engine Error:[/bold red] {e}")
+        raise typer.Exit(code=1) from e
+
+    fmt = output_format.strip().lower()
+
+    if fmt in ("json",):
+        json_output = format_diff_json(diff_result)
+        if output:
+            try:
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_text(json_output, encoding="utf-8")
+                console.print(f"[bold green]Diff JSON written to:[/bold green] {output}")
+            except Exception as e:
+                err_console.print(f"[bold red]File Error:[/bold red] Failed writing diff JSON: {e}")
+                raise typer.Exit(code=1) from e
+        else:
+            console.print(json_output)
+
+    elif fmt in ("markdown", "md"):
+        md_output = format_diff_markdown(diff_result)
+        if output:
+            try:
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_text(md_output, encoding="utf-8")
+                console.print(f"[bold green]Diff report written to:[/bold green] {output}")
+            except Exception as e:
+                err_console.print(
+                    f"[bold red]File Error:[/bold red] Failed writing Markdown report: {e}"
+                )
+                raise typer.Exit(code=1) from e
+        else:
+            console.print(Markdown(md_output))
+
+    else:
+        # Console presentation
+        hdr, tbl, warns = format_diff_console(diff_result)
+        console.print(hdr)
+        for w in warns:
+            console.print(w)
+        console.print(tbl)
 
 
 def cli_entrypoint() -> None:

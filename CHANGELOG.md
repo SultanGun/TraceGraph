@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0-alpha] - 2026-10-27
+
+### Added
+- **Snapshot Data Model & Storage Subsystem (`tracegraph.snapshots`):**
+  - Immutable point-in-time capture of an investigation's evidence graph state (entities, relationships, observations, evidence links, metadata, and SHA-256 digest).
+  - Storage table `snapshots` with foreign key cascade to `investigations`.
+  - Repository methods: `create_snapshot`, `get_snapshot`, `list_snapshots`, and `verify_snapshot_integrity`.
+- **Deterministic Serialization & Integrity Verification:**
+  - Canonical dictionary normalization sorting entities, relationships, observations, and evidence links deterministically.
+  - Strict UTC ISO-8601 timestamp normalization.
+  - Cryptographic SHA-256 content digest computation ensuring tamper and corruption detection.
+- **Temporal Snapshot Diff Engine (`diff_snapshots`):**
+  - Pure differential computation comparing two snapshots within the same investigation.
+  - Detects added entities, unobserved entities, modified entity values, added relationships, removed relationships, updated evidence links, and new observations.
+  - Strictly rejects cross-investigation comparisons via `CrossInvestigationDiffError`.
+  - Explicitly distinguishes observed absence from decommissioning proof.
+  - Collector failure warnings: flags unobserved entities that may stem from collector errors or timeouts rather than actual infrastructure decommissioning.
+- **CLI Subcommand Group (`tracegraph snapshot`):**
+  - `tracegraph snapshot create <investigation_id> [--label <label>]`: Captures an immutable snapshot.
+  - `tracegraph snapshot list [--investigation <id>]`: Displays compact tabular summary of snapshots.
+  - `tracegraph snapshot show <snapshot_id> [--verify]`: Details snapshot state with on-the-fly cryptographic verification.
+  - `tracegraph snapshot diff <snap_a> <snap_b> [--format console|markdown|json] [--output <file>]`: Generates visual terminal tables, GitHub-Flavored Markdown reports, or structured JSON exports.
+- **Relational Schema v3.0.0 & Automated Migrations:**
+  - Added `snapshots` table with indexes on `investigation_id`, `created_at`, and `content_digest`.
+  - Sequential, forward-only transactional migration `1.0.0 -> 2.0.0 -> 3.0.0` via `migrations.py`.
+  - Workspace status reports total snapshot count.
+
+### Changed
+- Bumped package version to `0.3.0-alpha` (`0.3.0a1`).
+- Upgraded `LATEST_SCHEMA_VERSION` to `3.0.0`.
+- Expanded test suite to 120 passing unit and integration tests (88% statement coverage).
+
+---
+
 ## [0.2.0-alpha] - 2026-10-26
 
 ### Added
