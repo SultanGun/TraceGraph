@@ -30,6 +30,7 @@ from tracegraph.storage.schema import (
     MetadataRecord,
     ObservationRecord,
     RelationshipRecord,
+    SnapshotRecord,
 )
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,7 @@ class WorkspaceStatus:
     entity_count: int = 0
     observation_count: int = 0
     relationship_count: int = 0
+    snapshot_count: int = 0
     error_message: str | None = None
 
 
@@ -153,11 +155,16 @@ def get_workspace_status(workspace_dir: Path | str | None = None) -> WorkspaceSt
         entity_cnt = 0
         obs_cnt = 0
         rel_cnt = 0
+        snap_cnt = 0
 
         with session_scope(session_factory) as session:
             entity_cnt = session.query(EntityRecord).count()
             obs_cnt = session.query(ObservationRecord).count()
             rel_cnt = session.query(RelationshipRecord).count()
+            try:
+                snap_cnt = session.query(SnapshotRecord).count()
+            except Exception:
+                snap_cnt = 0
 
         is_init = schema_ver is not None
 
@@ -173,6 +180,7 @@ def get_workspace_status(workspace_dir: Path | str | None = None) -> WorkspaceSt
             entity_count=entity_cnt,
             observation_count=obs_cnt,
             relationship_count=rel_cnt,
+            snapshot_count=snap_cnt,
         )
     except Exception as e:
         logger.debug("Failed checking workspace status: %s", e)

@@ -62,6 +62,9 @@ class InvestigationRecord(Base):
     observations: Mapped[list["ObservationRecord"]] = orm_relationship(
         "ObservationRecord", back_populates="investigation", cascade="all, delete-orphan"
     )
+    snapshots: Mapped[list["SnapshotRecord"]] = orm_relationship(
+        "SnapshotRecord", back_populates="investigation", cascade="all, delete-orphan"
+    )
 
 
 class EntityRecord(Base):
@@ -196,4 +199,37 @@ class RelationshipEvidenceRecord(Base):
 
     __table_args__ = (
         UniqueConstraint("relationship_id", "observation_id", name="uq_relationship_observation"),
+    )
+
+
+class SnapshotRecord(Base):
+    """Immutable point-in-time capture of an investigation's evidence graph state."""
+
+    __tablename__ = "snapshots"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    investigation_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("investigations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    label: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    schema_version: Mapped[str] = mapped_column(String(20), nullable=False, default="3.0.0")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+    content_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    entity_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    relationship_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    observation_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    snapshot_data: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+    investigation: Mapped["InvestigationRecord"] = orm_relationship(
+        "InvestigationRecord", back_populates="snapshots"
+    )
+
+    __table_args__ = (
+        Index("idx_snapshots_investigation_id", "investigation_id"),
+        Index("idx_snapshots_created_at", "created_at"),
     )

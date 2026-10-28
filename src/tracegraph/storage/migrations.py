@@ -9,7 +9,7 @@ from tracegraph.core.exceptions import MigrationError
 
 logger = logging.getLogger(__name__)
 
-LATEST_SCHEMA_VERSION = "2.0.0"
+LATEST_SCHEMA_VERSION = "3.0.0"
 
 
 def get_current_schema_version(engine: Engine) -> str | None:
@@ -111,6 +111,69 @@ def migrate_v1_to_v2(conn) -> None:
     )
 
 
+def migrate_v2_to_v3(conn) -> None:
+    """Migrate SQLite schema from v2.0.0 to v3.0.0.
+
+    Changes:
+    - Create snapshots table for point-in-time evidence graph snapshots and digests.
+    - Create indexes on snapshots(investigation_id) and snapshots(created_at).
+    - Update schema_version to 3.0.0.
+    """
+    logger.info("Migrating database schema from v2.0.0 to v3.0.0...")
+
+    # Check if snapshots table already exists
+    table_check = conn.execute(
+        text("SELECT name FROM sqlite_master WHERE type='table' AND name='snapshots';")
+    ).scalar()
+
+    if not table_check:
+        conn.execute(
+            text(
+                "CREATE TABLE snapshots ("
+                "id VARCHAR(36) PRIMARY KEY, "
+                "investigation_id VARCHAR(36) NOT NULL "
+                "REFERENCES investigations(id) ON DELETE CASCADE, "
+                "label VARCHAR(255), "
+                "schema_version VARCHAR(20) NOT NULL DEFAULT '3.0.0', "
+                "created_at DATETIME NOT NULL, "
+                "content_digest VARCHAR(64) NOT NULL, "
+                "entity_count INTEGER NOT NULL DEFAULT 0, "
+                "relationship_count INTEGER NOT NULL DEFAULT 0, "
+                "observation_count INTEGER NOT NULL DEFAULT 0, "
+                "snapshot_data JSON NOT NULL"
+                ");"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_snapshots_investigation_id "
+                "ON snapshots(investigation_id);"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_snapshots_created_at "
+                "ON snapshots(created_at);"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_snapshots_content_digest "
+                "ON snapshots(content_digest);"
+            )
+        )
+
+    # Update metadata record
+    now_iso = datetime.now(UTC).isoformat()
+    conn.execute(
+        text(
+            "UPDATE metadata SET value = '3.0.0', updated_at = :updated_at "
+            "WHERE key = 'schema_version';"
+        ),
+        {"updated_at": now_iso},
+    )
+
+
 def apply_migrations(engine: Engine) -> str:
     """Evaluate and sequentially execute pending database schema migrations."""
     current_ver = get_current_schema_version(engine)
@@ -125,6 +188,9 @@ def apply_migrations(engine: Engine) -> str:
             if current_ver == "1.0.0":
                 migrate_v1_to_v2(conn)
                 current_ver = "2.0.0"
+            if current_ver == "2.0.0":
+                migrate_v2_to_v3(conn)
+                current_ver = "3.0.0"
 
         logger.info("Successfully migrated schema to v%s", current_ver)
         return current_ver

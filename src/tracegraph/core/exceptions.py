@@ -55,3 +55,19 @@ class CollectorTimeoutError(CollectorError):
 
 class CollectorExecutionError(CollectorError):
     """Raised when collector execution crashes or encounters unexpected errors."""
+
+
+class SnapshotError(TraceGraphError):
+    """Base exception for snapshot and diff failures."""
+
+
+class CrossInvestigationDiffError(SnapshotError):
+    """Raised when attempting to compare snapshots from different investigations."""
+
+
+class SnapshotIntegrityError(SnapshotError):
+    """Raised when snapshot content fails hash digest verification or is corrupted."""
+
+
+class AmbiguousSnapshotError(SnapshotError):
+    """Raised when an abbreviated snapshot identifier matches multiple snapshots."""

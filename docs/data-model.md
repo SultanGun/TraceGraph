@@ -1,6 +1,6 @@
 # TraceGraph Data Model & Evidence Schema
 
-This document details the relational schema, entity validation rules, deduplication strategy, and evidence provenance invariants implemented in TraceGraph.
+This document details the relational schema, entity validation rules, deduplication strategy, snapshot architecture, and evidence provenance invariants implemented in TraceGraph.
 
 ---
 
@@ -55,6 +55,19 @@ erDiagram
         string notes
     }
 
+    SNAPSHOT {
+        string id PK
+        string investigation_id FK
+        string label
+        string schema_version
+        datetime created_at
+        string content_digest
+        integer entity_count
+        integer relationship_count
+        integer observation_count
+        json snapshot_data
+    }
+
     METADATA {
         string key PK
         string value
@@ -62,6 +75,7 @@ erDiagram
     }
 
     INVESTIGATION ||--o{ OBSERVATION : "contains"
+    INVESTIGATION ||--o{ SNAPSHOT : "has snapshots"
     ENTITY ||--o{ OBSERVATION : "is observed by"
     ENTITY ||--o{ RELATIONSHIP : "is source of"
     ENTITY ||--o{ RELATIONSHIP : "is target of"
@@ -145,7 +159,23 @@ Join table connecting a relationship to its supporting observation records.
 **Constraints:**
 - `UNIQUE(relationship_id, observation_id)`: Prevents redundant linking.
 
-### 2.6 `metadata`
+### 2.6 `snapshots`
+Point-in-time immutable capture of an investigation's evidence graph.
+
+| Column | Type | Nullable | Description |
+| :--- | :--- | :--- | :--- |
+| `id` | VARCHAR(36) | NO | Primary Key (UUIDv4). |
+| `investigation_id` | VARCHAR(36) | NO | Foreign Key to `investigations.id` (ON DELETE CASCADE). Indexed. |
+| `label` | VARCHAR(255) | YES | Optional user label (e.g. `Baseline Scan`, `Pre-cutover`). |
+| `schema_version` | VARCHAR(50) | NO | Schema format version (e.g. `3.0.0`). |
+| `created_at` | DATETIME | NO | UTC capture timestamp. Indexed. |
+| `content_digest` | VARCHAR(64) | NO | SHA-256 hash of canonicalized JSON content. Indexed. |
+| `entity_count` | INTEGER | NO | Total entities in snapshot graph. |
+| `relationship_count` | INTEGER | NO | Total relationships in snapshot graph. |
+| `observation_count` | INTEGER | NO | Total observations in snapshot graph. |
+| `snapshot_data` | JSON | NO | Canonical snapshot payload including entities, rels, obs, and links. |
+
+### 2.7 `metadata`
 Key-value workspace configuration and schema state.
 
 | Column | Type | Nullable | Description |
@@ -159,8 +189,10 @@ Key-value workspace configuration and schema state.
 ## 3. Provenance & Verification Rules
 
 1. **Unsupported Edge Invariant:** A relationship without at least one linked row in `relationship_evidence` evaluates `is_verified = False`. The platform must never label an unlinked relationship as verified.
-2. **Cascading Integrity:** Deleting an entity cascades and deletes its dependent observations and relationships. Deleting an observation removes its corresponding evidence link rows without destroying the underlying entities.
-3. **Temporal Distinction:**
+2. **Snapshot Immutability Invariant:** Snapshots store a self-contained, canonical serialization of the investigation's graph at capture time. Subsequent collections, entity mutations, or relationship additions never alter previously taken snapshots.
+3. **Cryptographic Content Digest:** Every snapshot computes a deterministic SHA-256 digest of canonicalized content (`entities`, `relationships`, `observations`, and `evidence_links` sorted by canonical domain keys with normalized UTC ISO timestamps). Tampering with any byte inside `snapshot_data` invalidates `verify_snapshot_integrity()`.
+4. **Cascading Integrity:** Deleting an entity cascades and deletes its dependent observations and relationships. Deleting an investigation cascades and removes all associated observations and snapshots.
+5. **Temporal Distinction:**
    - `observed_at` represents real-world timestamp of the artifact.
    - `ingested_at` represents storage time in TraceGraph.
    This guarantees that historical replays and imported archives maintain truthful telemetry timelines.
@@ -188,13 +220,11 @@ TraceGraph uses explicit, versioned relational schema tracking via the `metadata
 ### Schema Version History
 - **v1.0.0 (v0.1.0-alpha):** Initial foundation with unassociated observations and implicit investigation boundaries.
 - **v2.0.0 (v0.2.0-alpha):** Added `target_scope` column to `investigations` and `investigation_id` column to `observations`.
+- **v3.0.0 (v0.3.0-alpha):** Added `snapshots` table with foreign key cascade to `investigations` and indexes on `investigation_id`, `created_at`, and `content_digest`.
 
 ### Migration Mechanics (`src/tracegraph/storage/migrations.py`)
-- Upgrading from v1.0.0 to v2.0.0 is executed within a database transaction:
-  1. Inspects existing table columns to avoid duplicate alterations.
-  2. Executes `ALTER TABLE investigations ADD COLUMN target_scope TEXT NOT NULL DEFAULT ''`.
-  3. Executes `ALTER TABLE observations ADD COLUMN investigation_id VARCHAR(36) REFERENCES investigations(id) ON DELETE CASCADE`.
-  4. Builds index `idx_observations_investigation_id` on `observations(investigation_id)`.
-  5. Backfills any legacy observations where `investigation_id IS NULL` by inserting and linking them to an auto-created `legacy-v0.1-investigation` scope boundary (`target_scope = '*'`).
-  6. Updates `metadata` record `schema_version` to `'2.0.0'`.
-- Migrations are automatically applied whenever `tracegraph init` or workspace verification runs on an existing v1 database. Zero data loss is guaranteed.
+- Upgrades are executed sequentially in forward-only transactions:
+  1. `1.0.0 -> 2.0.0`: Adds `target_scope` and `investigation_id`, builds index, and backfills legacy observations to `legacy-v0.1-investigation`.
+  2. `2.0.0 -> 3.0.0`: Creates `snapshots` table with foreign keys, checks, and performance indexes.
+  3. Updates `metadata` record `schema_version` to `'3.0.0'`.
+- Migrations are automatically applied whenever `tracegraph init` or workspace verification runs on an existing database. Zero data loss is guaranteed.
