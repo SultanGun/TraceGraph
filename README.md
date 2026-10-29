@@ -9,7 +9,7 @@ Conventional OSINT and reconnaissance tools frequently aggregate external data w
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![Status](https://img.shields.io/badge/status-v0.3.0--alpha-orange.svg)](CHANGELOG.md)
-[![CI](https://github.com/tracegraph/tracegraph/actions/workflows/ci.yml/badge.svg)](.github/workflows/ci.yml)
+[![CI](https://github.com/SultanGun/TraceGraph/actions/workflows/ci.yml/badge.svg)](https://github.com/SultanGun/TraceGraph/actions/workflows/ci.yml)
 
 ---
 
