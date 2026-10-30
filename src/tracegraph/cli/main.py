@@ -16,6 +16,7 @@ from tracegraph.collectors.mock import MockDNSCollector
 from tracegraph.collectors.rdap import RDAPCollector
 from tracegraph.core.enums import CollectionStatus, EntityType
 from tracegraph.core.exceptions import (
+    AmbiguousInvestigationError,
     AmbiguousSnapshotError,
     CrossInvestigationDiffError,
     NotFoundError,
@@ -321,6 +322,9 @@ def investigate_show_cmd(
 
     try:
         inv = repo.get_investigation(investigation_id)
+    except AmbiguousInvestigationError as e:
+        err_console.print(f"[bold red]Ambiguity Error:[/bold red] {e}")
+        raise typer.Exit(code=1) from e
     except NotFoundError:
         err_console.print(
             f"[bold red]Error:[/bold red] Investigation '{investigation_id}' not found."
@@ -417,6 +421,9 @@ def collect_cmd(
     if investigation_id:
         try:
             selected_inv = repo.get_investigation(investigation_id)
+        except AmbiguousInvestigationError as e:
+            err_console.print(f"[bold red]Ambiguity Error:[/bold red] {e}")
+            raise typer.Exit(code=1) from e
         except NotFoundError:
             err_console.print(
                 f"[bold red]Error:[/bold red] Investigation '{investigation_id}' not found."
@@ -602,6 +609,9 @@ def report_cmd(
 
     try:
         inv = repo.get_investigation(investigation_id)
+    except AmbiguousInvestigationError as e:
+        err_console.print(f"[bold red]Ambiguity Error:[/bold red] {e}")
+        raise typer.Exit(code=1) from e
     except NotFoundError:
         err_console.print(
             f"[bold red]Error:[/bold red] Investigation '{investigation_id}' not found."
@@ -684,6 +694,9 @@ def snapshot_create_cmd(
     if investigation_id:
         try:
             selected_inv = repo.get_investigation(investigation_id)
+        except AmbiguousInvestigationError as e:
+            err_console.print(f"[bold red]Ambiguity Error:[/bold red] {e}")
+            raise typer.Exit(code=1) from e
         except NotFoundError:
             err_console.print(
                 f"[bold red]Error:[/bold red] Investigation '{investigation_id}' not found."
@@ -759,7 +772,20 @@ def snapshot_list_cmd(
     target_ws = resolve_workspace_path(workspace)
     repo = _get_repo(target_ws)
 
-    snaps = repo.list_snapshots(investigation_id=investigation_id)
+    resolved_inv_id = None
+    if investigation_id:
+        try:
+            inv = repo.get_investigation(investigation_id)
+            resolved_inv_id = inv.id
+        except AmbiguousInvestigationError as e:
+            err_console.print(f"[bold red]Ambiguity Error:[/bold red] {e}")
+            raise typer.Exit(code=1) from e
+        except NotFoundError:
+            err_console.print(
+                f"[bold red]Error:[/bold red] Investigation '{investigation_id}' not found."
+            )
+            raise typer.Exit(code=1)
+    snaps = repo.list_snapshots(investigation_id=resolved_inv_id)
     if not snaps:
         console.print(
             "[yellow]No snapshots found. Create one with "

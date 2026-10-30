@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from tracegraph.core.enums import CollectionStatus, EntityType, RelationshipType
 from tracegraph.core.exceptions import (
+    AmbiguousInvestigationError,
     AmbiguousSnapshotError,
     DatabaseIntegrityError,
     NotFoundError,
@@ -93,10 +94,37 @@ class EvidenceRepository:
 
         return model
 
+    def _resolve_investigation_record(
+        self, session: Session, investigation_id: str
+    ) -> InvestigationRecord:
+        """Resolve an InvestigationRecord by full UUID or unique prefix of at least 8 characters."""
+        clean_id = investigation_id.strip()
+        record = session.get(InvestigationRecord, clean_id)
+        if not record and len(clean_id) >= 8:
+            matches = list(
+                session.execute(
+                    select(InvestigationRecord).where(
+                        InvestigationRecord.id.startswith(clean_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if len(matches) == 1:
+                record = matches[0]
+            elif len(matches) > 1:
+                raise AmbiguousInvestigationError(
+                    f"Investigation identifier prefix '{clean_id}' is ambiguous "
+                    f"({len(matches)} matches found)."
+                )
+        if not record:
+            raise NotFoundError(f"Investigation '{clean_id}' not found")
+        return record
+
     def get_investigation(self, investigation_id: str) -> InvestigationModel:
         """Retrieve an investigation by ID."""
         with session_scope(self.session_factory) as session:
-            record = session.get(InvestigationRecord, investigation_id)
+            record = self._resolve_investigation_record(session, investigation_id)
             if not record:
                 raise NotFoundError(f"Investigation '{investigation_id}' not found")
             return InvestigationModel(
@@ -275,9 +303,9 @@ class EvidenceRepository:
 
             # Verify investigation if provided
             if investigation_id:
-                inv = session.get(InvestigationRecord, investigation_id)
-                if not inv:
-                    raise NotFoundError(f"Investigation '{investigation_id}' does not exist")
+                inv = self._resolve_investigation_record(session, investigation_id)
+                model.investigation_id = inv.id
+
 
             record = ObservationRecord(
                 id=model.id,
@@ -321,9 +349,10 @@ class EvidenceRepository:
     ) -> list[ObservationModel]:
         """List all observations associated with a specific investigation."""
         with session_scope(self.session_factory) as session:
+            inv = self._resolve_investigation_record(session, investigation_id)
             stmt = (
                 select(ObservationRecord)
-                .where(ObservationRecord.investigation_id == investigation_id)
+                .where(ObservationRecord.investigation_id == inv.id)
                 .order_by(ObservationRecord.observed_at.desc())
             )
             records = session.execute(stmt).scalars().all()
@@ -581,15 +610,13 @@ class EvidenceRepository:
         self, session: Session, investigation_id: str
     ) -> SnapshotContent:
         """Extract complete evidence graph for an investigation from the database."""
-        inv = session.get(InvestigationRecord, investigation_id)
-        if not inv:
-            raise NotFoundError(f"Investigation '{investigation_id}' not found")
+        inv = self._resolve_investigation_record(session, investigation_id)
 
         # 1. Query observations for this investigation
         obs_records = (
             session.execute(
                 select(ObservationRecord)
-                .where(ObservationRecord.investigation_id == investigation_id)
+                .where(ObservationRecord.investigation_id == inv.id)
                 .order_by(ObservationRecord.observed_at.asc())
             )
             .scalars()
@@ -730,7 +757,7 @@ class EvidenceRepository:
 
             rec = SnapshotRecord(
                 id=sid,
-                investigation_id=investigation_id,
+                investigation_id=content.investigation_id,
                 label=label,
                 schema_version="3.0.0",
                 created_at=datetime.now(UTC),
@@ -806,7 +833,8 @@ class EvidenceRepository:
         with session_scope(self.session_factory) as session:
             stmt = select(SnapshotRecord).order_by(SnapshotRecord.created_at.desc())
             if investigation_id:
-                stmt = stmt.where(SnapshotRecord.investigation_id == investigation_id)
+                inv = self._resolve_investigation_record(session, investigation_id)
+                stmt = stmt.where(SnapshotRecord.investigation_id == inv.id)
             stmt = stmt.limit(limit).offset(offset)
 
             records = session.execute(stmt).scalars().all()

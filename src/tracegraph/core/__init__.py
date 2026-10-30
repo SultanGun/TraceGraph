@@ -2,6 +2,7 @@
 
 from tracegraph.core.enums import CollectionStatus, EntityType, RelationshipType
 from tracegraph.core.exceptions import (
+    AmbiguousInvestigationError,
     AmbiguousSnapshotError,
     CollectorError,
     CollectorExecutionError,
@@ -25,6 +26,7 @@ from tracegraph.core.normalizers import normalize_entity_value, validate_and_nor
 from tracegraph.core.scope import ScopeValidator, assert_public_ip, is_public_ip
 
 __all__ = [
+    "AmbiguousInvestigationError",
     "AmbiguousSnapshotError",
     "CollectionStatus",
     "CollectorError",

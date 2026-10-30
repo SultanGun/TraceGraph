@@ -6,9 +6,13 @@ import pytest
 from sqlalchemy import text
 
 from tracegraph.core.enums import CollectionStatus, EntityType, RelationshipType
-from tracegraph.core.exceptions import DatabaseIntegrityError, NotFoundError
+from tracegraph.core.exceptions import (
+    AmbiguousInvestigationError,
+    DatabaseIntegrityError,
+    NotFoundError,
+)
 from tracegraph.storage.database import check_connection, session_scope
-from tracegraph.storage.schema import EntityRecord
+from tracegraph.storage.schema import EntityRecord, InvestigationRecord
 
 
 class TestStorageEngine:
@@ -33,6 +37,73 @@ class TestEvidenceRepository:
         assert fetched.id == inv.id
         assert fetched.name == "Alpha Scope"
         assert fetched.config_metadata == {"target": "example.com"}
+
+    def test_investigation_id_prefix_resolution(self, evidence_repo, test_session_factory):
+        """Investigation retrieval resolves unique prefixes of at least 8 characters."""
+        inv = evidence_repo.create_investigation(
+            name="Prefix Resolution Test Investigation",
+            description="Testing prefix resolution",
+        )
+
+        # 1. Full UUID lookup works
+        full_res = evidence_repo.get_investigation(inv.id)
+        assert full_res.id == inv.id
+        assert full_res.name == "Prefix Resolution Test Investigation"
+
+        # 2. 8-character unique prefix works
+        prefix_8 = inv.id[:8]
+        p8_res = evidence_repo.get_investigation(prefix_8)
+        assert p8_res.id == inv.id
+        assert p8_res.name == "Prefix Resolution Test Investigation"
+
+        # 3. 12-character unique prefix works
+        prefix_12 = inv.id[:12]
+        p12_res = evidence_repo.get_investigation(prefix_12)
+        assert p12_res.id == inv.id
+
+        # 4. Prefix shorter than 8 characters is rejected with NotFoundError
+        with pytest.raises(NotFoundError):
+            evidence_repo.get_investigation(inv.id[:7])
+
+        # 5. Non-existent prefix raises NotFoundError
+        with pytest.raises(NotFoundError):
+            evidence_repo.get_investigation("ffffffff-ffff")
+
+        # 6. Ambiguous prefix matching multiple investigations raises AmbiguousInvestigationError
+        col1_id = "aaaa1111-0000-4000-8000-000000000001"
+        col2_id = "aaaa1111-0000-4000-8000-000000000002"
+        now = datetime.now(UTC)
+        with session_scope(test_session_factory) as session:
+            session.add(
+                InvestigationRecord(
+                    id=col1_id,
+                    name="Ambiguous Alpha",
+                    description="Collision 1",
+                    target_scope="example.com",
+                    created_at=now,
+                )
+            )
+            session.add(
+                InvestigationRecord(
+                    id=col2_id,
+                    name="Ambiguous Beta",
+                    description="Collision 2",
+                    target_scope="example.com",
+                    created_at=now,
+                )
+            )
+
+        with pytest.raises(AmbiguousInvestigationError) as exc_info:
+            evidence_repo.get_investigation("aaaa1111")
+        assert "ambiguous" in str(exc_info.value).lower()
+
+        # 7. Prefix resolution works with snapshot creation and filtering
+        snap = evidence_repo.create_snapshot(prefix_8, label="Prefix Snap")
+        assert snap.investigation_id == inv.id
+
+        snaps_filtered = evidence_repo.list_snapshots(investigation_id=prefix_8)
+        assert len(snaps_filtered) == 1
+        assert snaps_filtered[0].id == snap.id
 
     def test_entity_deduplication(self, evidence_repo):
         # 1. Create initial entity

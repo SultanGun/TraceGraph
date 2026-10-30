@@ -128,9 +128,7 @@ tracegraph status
 Create an investigation defining the permitted target boundary:
 
 ```bash
-tracegraph investigate new "Acme Security Audit" \
-  --scope "example.com" \
-  --desc "Baseline perimeter assessment"
+tracegraph investigate new "Acme Security Audit" --scope "example.com" --desc "Baseline perimeter assessment"
 ```
 
 ### Step 3: Collect Baseline Evidence (Offline Synthetic)
@@ -203,6 +201,8 @@ Compile an evidence-backed Markdown investigation report citing all observations
 ```bash
 tracegraph report <INVESTIGATION_ID> --output investigation_report.md
 ```
+
+*(TraceGraph supports unique 8-character ID prefixes or full UUIDs).*
 
 ---
 
@@ -280,9 +280,9 @@ Options:
 | `status` | `tracegraph status [-w <dir>]` | Inspect workspace path, database connectivity, schema version, and entity/snapshot counts. |
 | `investigate new` | `tracegraph investigate new <name> [-s <scope>] [-d <desc>] [-w <dir>]` | Establish a new investigation boundary and declared target scope. |
 | `investigate list` | `tracegraph investigate list [-w <dir>]` | List all investigations in the active workspace. |
-| `investigate show` | `tracegraph investigate show <id> [-w <dir>]` | Display detailed metadata and entity metrics for an investigation. |
+| `investigate show` | `tracegraph investigate show <id> [-w <dir>]` | Display detailed metadata and entity metrics for an investigation. Accepts $\ge 8$-char prefix. |
 | `collect` | `tracegraph collect <target> -c <collector> [-i <id>] [-w <dir>]` | Execute bounded data collection against target within declared scope. Collectors: `live_dns`, `rdap`, `mock_dns`. |
-| `report` | `tracegraph report <investigation_id> [-o <file>] [-w <dir>]` | Generate an evidence-backed Markdown investigation report. |
+| `report` | `tracegraph report <investigation_id> [-o <file>] [-w <dir>]` | Generate an evidence-backed Markdown investigation report. Accepts $\ge 8$-char prefix. |
 | `snapshot create` | `tracegraph snapshot create [investigation_id] [-l <label>] [-w <dir>]` | Capture an immutable evidence graph snapshot. Auto-selects if 1 investigation exists. |
 | `snapshot list` | `tracegraph snapshot list [-i <investigation_id>] [-w <dir>]` | List captured snapshots with entity counts, relationship counts, and digests. |
 | `snapshot show` | `tracegraph snapshot show <snapshot_id> [--verify] [-w <dir>]` | Inspect snapshot metadata. `--verify` recomputes canonical SHA-256 digest. Accepts $\ge 8$-char prefix. |

@@ -272,3 +272,114 @@ class TestInvestigationWorkflow:
         assert "# TraceGraph Investigation Report: Operation Blue Shield" in content
         assert "93.184.215.14" in content
         assert "RESOLVES_TO" in content
+
+    def test_investigation_prefix_cli_resolution(self, tmp_path: Path):
+        """CLI commands accept unique investigation ID prefixes >= 8 characters."""
+        ws_dir = tmp_path / "ws_prefix"
+        runner.invoke(app, ["init", "--workspace", str(ws_dir)])
+
+        # 1. Create investigation
+        res_new = runner.invoke(
+            app,
+            [
+                "investigate",
+                "new",
+                "Prefix Audit",
+                "--scope",
+                "example.com",
+                "--workspace",
+                str(ws_dir),
+            ],
+        )
+        assert res_new.exit_code == 0
+        match = re.search(r"ID:\s+([a-f0-9\-]{36})", res_new.stdout)
+        assert match is not None
+        full_id = match.group(1)
+        prefix_8 = full_id[:8]
+
+        # 2. Collect using prefix
+        res_col = runner.invoke(
+            app,
+            [
+                "collect",
+                "example.com",
+                "--collector",
+                "mock_dns",
+                "--investigation",
+                prefix_8,
+                "--workspace",
+                str(ws_dir),
+            ],
+        )
+        assert res_col.exit_code == 0
+
+        # 3. Investigate show using prefix
+        res_show = runner.invoke(
+            app,
+            ["investigate", "show", prefix_8, "--workspace", str(ws_dir)],
+        )
+        assert res_show.exit_code == 0
+        assert "Prefix Audit" in res_show.stdout
+        assert "Investigation Details" in res_show.stdout
+
+        # 4. Report generation using prefix
+        rep_file = tmp_path / "prefix_report.md"
+        res_rep = runner.invoke(
+            app,
+            [
+                "report",
+                prefix_8,
+                "--output",
+                str(rep_file),
+                "--workspace",
+                str(ws_dir),
+            ],
+        )
+        assert res_rep.exit_code == 0
+        assert "Report written to" in res_rep.stdout
+        assert rep_file.is_file()
+
+        # 5. Snapshot create and list using investigation prefix
+        res_snap = runner.invoke(
+            app,
+            [
+                "snapshot",
+                "create",
+                prefix_8,
+                "--label",
+                "Prefix Snap Test",
+                "--workspace",
+                str(ws_dir),
+            ],
+        )
+        assert res_snap.exit_code == 0
+
+        res_list = runner.invoke(
+            app,
+            [
+                "snapshot",
+                "list",
+                "-i",
+                prefix_8,
+                "--workspace",
+                str(ws_dir),
+            ],
+        )
+        assert res_list.exit_code == 0
+        assert "Prefix Snap Test" in res_list.stdout
+
+        # 6. Prefix shorter than 8 characters is rejected
+        res_short = runner.invoke(
+            app,
+            ["investigate", "show", full_id[:7], "--workspace", str(ws_dir)],
+        )
+        assert res_short.exit_code == 1
+        assert "not found" in (res_short.stderr + res_short.stdout).lower()
+
+        # 7. Non-existent prefix is rejected
+        res_unknown = runner.invoke(
+            app,
+            ["report", "ffffffff-ffff", "--workspace", str(ws_dir)],
+        )
+        assert res_unknown.exit_code == 1
+        assert "not found" in (res_unknown.stderr + res_unknown.stdout).lower()

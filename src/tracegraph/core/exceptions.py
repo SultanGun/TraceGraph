@@ -69,5 +69,9 @@ class SnapshotIntegrityError(SnapshotError):
     """Raised when snapshot content fails hash digest verification or is corrupted."""
 
 
+class AmbiguousInvestigationError(TraceGraphError):
+    """Raised when an abbreviated investigation identifier matches multiple investigations."""
+
+
 class AmbiguousSnapshotError(SnapshotError):
     """Raised when an abbreviated snapshot identifier matches multiple snapshots."""
